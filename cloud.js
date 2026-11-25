@@ -243,12 +243,13 @@
     const grid=document.createElement("div");grid.className="tripcards";
     for(const t of mine){
       const c=document.createElement("div");c.className="tripcard";
-      c.innerHTML='<h4>'+clean(t.name)+'</h4><p>'+clean(cityLabel(t.startLocation))+' → '+clean(cityLabel(t.endLocation||t.startLocation))+' · '+t.length+' days · '+t.parks.length+' parks</p><span class="badge '+(t.privacy==="public"?"link":"")+'">'+(t.privacy==="private"?"Private":t.privacy==="unlisted"?"Link sharing":"Public")+'</span><div class="tripactions"><button class="btn primary" data-open>'+(t.days.length?"Open plan":"Open trip")+'</button><button class="btn danger" data-delete>Delete</button></div>';
+      c.innerHTML='<h4>'+clean(t.name)+'</h4><p>'+clean(cityLabel(t.startLocation))+' → '+clean(cityLabel(t.endLocation||t.startLocation))+' · '+t.length+' days · '+t.parks.length+' parks</p><span class="badge '+(t.privacy==="public"?"link":"")+'">'+(t.privacy==="private"?"Private":t.privacy==="unlisted"?"Link sharing":"Public")+'</span><div class="tripactions"><button class="btn primary" data-open>'+(t.days.length?"Open plan":"Open trip")+'</button><button class="btn" data-edit>Edit Trip</button><button class="btn danger" data-delete>Delete</button></div>';
       c.querySelector("[data-open]").onclick=()=>{
         window.openTrip(t.id);
         const plan = $("#detailsSection");
         if(t.days.length && plan?.getClientRects().length) plan.scrollIntoView({block:"start"});
       };
+      c.querySelector("[data-edit]").onclick=()=>editOwnedTrip(t);
       c.querySelector("[data-delete]").onclick=()=>window.deleteTrip(t.id);
       grid.append(c);
     }
@@ -319,6 +320,14 @@
     history.replaceState(null,"",location.pathname+location.search+"#public="+encodeURIComponent(trip.id)+"&view=map");
     window.openNptWalk(trip);
   }
+  async function editOwnedTrip(trip) {
+    if (!user || !mine.some(item => item.id === trip.id)) return;
+    try {
+      await window.editNptProposal(trip);
+    } catch (error) {
+      alert(error.message || "Unable to open the trip editor.");
+    }
+  }
   window.showTrip = function(t,isOwner) {
     window.closeNptWalk?.();
     lastViewed=t;
@@ -326,10 +335,14 @@
     oldShowTrip(t,isOwner);
     $("#nptTripMapButton")?.remove();
     $("#nptEditProposal")?.remove();
+    const actions=$("#viewer .viewerbar-actions")||$("#viewer .viewerbar");
+    if(isOwner&&user&&mine.some(item=>item.id===t.id)){
+      const edit=document.createElement("button");
+      edit.className="btn";edit.id="nptEditProposal";edit.textContent="Edit Trip";
+      edit.onclick=()=>editOwnedTrip(t);actions.append(edit);
+    }
     if(t.segments?.length){
-      const actions=$("#viewer .viewerbar-actions")||$("#viewer .viewerbar");
       const preview=document.createElement("button");preview.className="btn primary";preview.id="nptTripMapButton";preview.textContent="Preview Drive";preview.onclick=()=>window.openNptWalk(t);actions.append(preview);
-      if(isOwner){const edit=document.createElement("button");edit.className="btn";edit.id="nptEditProposal";edit.textContent="Edit trip";edit.onclick=()=>window.editNptProposal(t);actions.append(edit);}
     }
     const publicMap=t.privacy==="public"?t:isOwner?publicTrips.find(trip=>
       t.name.replace(/ — restored draft$/,"")===trip.name&&t.length===trip.length
