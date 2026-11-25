@@ -329,6 +329,8 @@
     }
   }
   window.showTrip = function(t,isOwner) {
+    const owned=user&&mine.find(item=>item.id===t.id);
+    if(owned){t=owned;isOwner=true;}
     window.closeNptWalk?.();
     lastViewed=t;
     window.nptCanEdit=()=>Boolean(isOwner&&user&&lastViewed===t);
