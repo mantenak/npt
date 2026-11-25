@@ -45,6 +45,20 @@ async function searchMappedCampgrounds(term,point,radius){
  const data=await json('https://photon.komoot.io/api/?q='+encodeURIComponent(term)+'&lat='+point[0].toFixed(3)+'&lon='+point[1].toFixed(3)+'&limit=60&osm_tag=tourism:camp_site&osm_tag=tourism:caravan_site');return mapCampgroundRows(data.features,point,radius);
 }
 const parkDesignations=['national_park','national_park_canada','state_park'];
+function parkInState(park,state){
+ const codes=String(park.region||'').split(',').map(value=>value.trim().toUpperCase());
+ return codes.includes(state.code.toUpperCase())||codes.includes(state.name.toUpperCase());
+}
+async function parksInState(state,nationalParks){
+ const lookup=()=>db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url,metadata')
+  .not('latitude','is',null).not('longitude','is',null);
+ const [local,national]=await Promise.all([
+  query(lookup().eq('designation','state_park').or('region.eq.'+state.code+',region.eq.'+state.name).limit(1000)),
+  nationalParks||query(lookup().eq('designation','national_park'))
+ ]);
+ return [...national.filter(park=>park.designation==='national_park'&&parkInState(park,state)),
+  ...local.filter(park=>park.metadata?.coverage_status!=='inventory_record_needs_agency_validation')];
+}
 function parkAttractions(){
  return db().from('npt_attractions').select('*,npt_parks!inner(name,designation,region)')
   .in('npt_parks.designation',parkDesignations)
@@ -179,8 +193,8 @@ function showForm(){
  let chosen=pick(basics.parkType==='both'?[...parks,...state]:parks);if(!chosen.length)chosen=pick(state);
  if(basics.destination){
   const d=basics.destination;
-  let targets=d.park?[d.park]:await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url').in('designation',['national_park','national_park_canada','state_park']).or('region.eq.'+d.code+',region.eq.'+d.name).not('latitude','is',null).limit(500));
-  if(!targets.length)throw Error('No mapped parks found for that destination in the catalog. Try a specific park.');
+  let targets=d.park?[d.park]:await parksInState(d,parks);
+  if(!targets.length)throw Error('No verified mapped parks are available in the catalog for this state. Try a specific park, campground, or address.');
   const driveBudget=Math.min(planningDistance,(basics.hours||24)*45);
   const neededDays=p=>Math.ceil((C.miles(basics.start.point,C.point(p))+C.miles(C.point(p),basics.end.point))*1.3/driveBudget)+2;
   const feasible=targets.filter(p=>neededDays(p)<=basics.days);
@@ -224,7 +238,7 @@ function preTripSearch(start,destination,vehicle,length){
  const refreshSelected=()=>{selectedBox.replaceChildren(el('h4','Selected places ('+selected.length+')'));if(!selected.length){selectedBox.append(el('p','Nothing selected yet.',{class:'np-muted'}));return;}for(const item of selected){const row=el('div',null,{class:'np-selected-row'});row.append(el('span',(item.kind==='campground'?'Campsite · ':item.kind==='address'?'Address · ':'Attraction · ')+item.place.name),btn('Remove',()=>{selected.splice(selected.indexOf(item),1);refreshSelected();}));selectedBox.append(row);}};
  const radiusStateOption=[...radius.options].find(o=>o.value==='500');if(radiusStateOption)radiusStateOption.hidden=true;
  const help=el('small','Radius measures from the selected destination; if none is selected, it measures from your starting point. State destinations use Whole state automatically; otherwise choose how far from the destination to search.',{class:'np-muted np-radius-help'});
- const discoverTarget=async()=>{const d=destination.get();if(d?.point)return {center:d.point,label:d.name,state:false};if(d?.code){const areas=await query(db().from('npt_parks').select('latitude,longitude').eq('designation','state_park').or('region.eq.'+d.code+',region.eq.'+d.name).not('latitude','is',null).limit(500));if(!areas.length)throw Error('No mapped parks were found for '+d.name+'. Search a specific park instead.');return {center:[areas.reduce((n,p)=>n+Number(p.latitude),0)/areas.length,areas.reduce((n,p)=>n+Number(p.longitude),0)/areas.length],label:d.name,state:true};}const p=start.get()?.point;if(!p)throw Error('Select a starting point or destination before searching.');return {center:p,label:start.get().name,state:false};};
+ const discoverTarget=async()=>{const d=destination.get();if(d?.point)return {center:d.point,label:d.name,state:false};if(d?.code){const areas=await parksInState(d);if(!areas.length)throw Error('No mapped parks were found for '+d.name+'. Search a specific park instead.');return {center:[areas.reduce((n,p)=>n+Number(p.latitude),0)/areas.length,areas.reduce((n,p)=>n+Number(p.longitude),0)/areas.length],label:d.name,state:true};}const p=start.get()?.point;if(!p)throw Error('Select a starting point or destination before searching.');return {center:p,label:start.get().name,state:false};};
  const setRadiusMode=()=>{const isState=Boolean(destination.get()?.code);if(radiusStateOption)radiusStateOption.hidden=!isState;if(isState&&radius.value!=='500')radius.value='500';if(!isState&&radius.value==='500')radius.value='30';};
  let searchSequence=0,searchTimer;
  const paintRows=(rows,center,isCamp,range,needle,token)=>{if(token!==searchSequence)return;rows=rows.filter(c=>(!needle||[c.name,c.operator,c.metadata?.brand,c.region].filter(Boolean).join(' ').toLowerCase().includes(needle))&&(!isCamp||(!full.checked||c.electric_hookups===true&&c.water_hookups===true&&c.sewer_hookups===true)&&(!fit.checked||C.fit(c,{type:vehicle.value,rvLength:vehicle.value==='car'?null:Number(length.value)}).ok&&!C.fit(c,{type:vehicle.value,rvLength:vehicle.value==='car'?null:Number(length.value)}).unknown)));
@@ -483,7 +497,7 @@ async function completeInitialProposal(){
  for(const result of sights){
   if(result.status!=='fulfilled')continue;
   const {index,choices}=result.value;
-  const best=choices.filter(x=>sightPriority(x.c)<=1&&x.extra!=null&&x.extra<=25*1609.344&&
+  const best=choices.filter(x=>sightPriority(x.c)<=2&&x.extra!=null&&x.extra<=25*1609.344&&
    [x.a,x.b,x.firstSeconds,x.secondSeconds].every(Number.isFinite)&&
    magnitude(x.a+x.b,x.firstSeconds+x.secondSeconds)<=1&&!excluded.has(x.c.name.toLowerCase()))
    .sort((a,b)=>sightPriority(a.c)-sightPriority(b.c)||a.extra-b.extra)[0];
