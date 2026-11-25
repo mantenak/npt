@@ -45,6 +45,7 @@ async function searchMappedCampgrounds(term,point,radius){
  const data=await json('https://photon.komoot.io/api/?q='+encodeURIComponent(term)+'&lat='+point[0].toFixed(3)+'&lon='+point[1].toFixed(3)+'&limit=60&osm_tag=tourism:camp_site&osm_tag=tourism:caravan_site');return mapCampgroundRows(data.features,point,radius);
 }
 const parkDesignations=['national_park','national_park_canada','state_park'];
+function mustSeeStatePark(place){const m=place?.metadata||{};return place?.designation==='state_park'&&(m.must_see===true||m.trip_priority==='must_see'||m.priority==='must_see');}
 function parkInState(park,state){
  const codes=String(park.region||'').split(',').map(value=>value.trim().toUpperCase());
  return codes.includes(state.code.toUpperCase())||codes.includes(state.name.toUpperCase());
@@ -162,9 +163,10 @@ function destinationField(){
    if(!results.children.length)results.textContent='No mapped matches. Try another search.';
    return;
   }
-  const rows=await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url').in('designation',['national_park','national_park_canada','state_park']).ilike('name','%'+term.replace(/[%_]/g,'')+'%').not('latitude','is',null).order('name').limit(12));
+  const rows=await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url,metadata').in('designation',['national_park','national_park_canada','state_park']).ilike('name','%'+term.replace(/[%_]/g,'')+'%').not('latitude','is',null).order('name').limit(12));
   if(token!==request||!box.isConnected)return;results.replaceChildren();
   states.filter(x=>x.name.toLowerCase().includes(term.toLowerCase())||x.code.toLowerCase()===term.toLowerCase()).forEach(x=>option(x,x.name+' · State'));
+  rows.sort((a,b)=>Number(!mustSeeStatePark(a))-Number(!mustSeeStatePark(b))||Number(a.designation!=='state_park')-Number(b.designation!=='state_park')||a.name.localeCompare(b.name));
   rows.forEach(p=>option({name:p.name,point:C.point(p),park:p},p.name+' · '+(p.designation==='state_park'?'State park':'National park')+' · '+(p.region||'')));
   if(!results.children.length)results.textContent='No matching destination. Try another name.';
  }catch{if(token===request)results.textContent='Destination search unavailable. Try again.';}},250);};
@@ -185,10 +187,10 @@ function showForm(){
  form.append(el('h3','A few details. A whole trip to explore.'),el('p','Add the parks, campgrounds, and attractions you want, or leave the shortlist empty and let us suggest a route. Review and edit every stop before saving.',{class:'np-muted'}),grid,sameLabel,advanced,discovery.box,el('p','Address search uses the U.S. Census Bureau and OpenStreetMap. Confirm the selected location or adjust its map pin. Driving roads and distances load automatically for your proposal.',{class:'np-muted'}));
  const submit=el('button','Build my trip',{type:'submit',class:'btn primary'});form.append(status,submit);body.append(form);
  form.noValidate=true;form.onsubmit=e=>{e.preventDefault();const invalid=[...form.querySelectorAll('input,select')].find(x=>!x.validity.valid);if(invalid){say((invalid.closest('label')?.querySelector('span')?.textContent||'Field')+': '+invalid.validationMessage);invalid.scrollIntoView({block:'center'});invalid.focus();return;}run(async()=>{if(!start.get()||!same.checked&&!end.get())throw Error('Find and select your starting and ending locations.');if(distance.value===''&&!hours.value)throw Error('Enter a preferred distance or a maximum driving-hours limit.');if(destination.hasText()&&!destination.get())throw Error('Select a destination suggestion, or clear the field for an automatic route.');say('Finding parks and nearby campgrounds…');const basics={name:name.value.trim()||'My National Park Trip',days:Number(days.value),date:date.value,start:start.get(),end:same.checked?start.get():end.get(),hours:hours.value?Number(hours.value):null,destination:destination.get(),distance:distance.value===''?null:Number(distance.value),vehicle:{type:vehicle.value,rvLength:vehicle.value==='car'?null:Number(length.value)},parkType:parkType.value};
- let parks=await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url').in('designation',['national_park','national_park_canada']).not('latitude','is',null));
+ let parks=await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url,metadata').in('designation',['national_park','national_park_canada']).not('latitude','is',null));
  // State parks near the start provide options for shorter trips and explicit state-park preferences.
  const planningDistance=basics.hours!=null?basics.hours*45:basics.distance;const [lat,lon]=basics.destination?.point||basics.start.point,span=Math.min(12,planningDistance/50);
- const state=await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url').eq('designation','state_park').gte('latitude',lat-span).lte('latitude',lat+span).gte('longitude',lon-span*1.6).lte('longitude',lon+span*1.6).limit(500));
+ const state=await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url,metadata').eq('designation','state_park').gte('latitude',lat-span).lte('latitude',lat+span).gte('longitude',lon-span*1.6).lte('longitude',lon+span*1.6).limit(500));
  const pick=p=>C.chooseParks(p,basics.start.point,basics.end.point,basics.days,basics.hours,planningDistance);
  let chosen=pick(basics.parkType==='both'?[...parks,...state]:parks);if(!chosen.length)chosen=pick(state);
  if(basics.destination){
@@ -199,10 +201,11 @@ function showForm(){
   const neededDays=p=>Math.ceil((C.miles(basics.start.point,C.point(p))+C.miles(C.point(p),basics.end.point))*1.3/driveBudget)+2;
   const feasible=targets.filter(p=>neededDays(p)<=basics.days);
   if(!feasible.length)throw Error('The closest matching destination needs more days at your driving preferences. Increase trip days or choose a closer destination.');
-  feasible.sort((a,b)=>Number(a.designation==='state_park')-Number(b.designation==='state_park')||
-   neededDays(a)-neededDays(b)||C.miles(basics.start.point,C.point(a))-C.miles(basics.start.point,C.point(b)));
-  const anchor=feasible[0],near=d.park?[...parks,...state].filter(p=>p.id!==anchor.id&&C.miles(C.point(p),C.point(anchor))<100):feasible.slice(1);
-  chosen=[anchor,...C.chooseParks(near,C.point(anchor),basics.end.point,Math.max(2,basics.days-neededDays(anchor)+2),basics.hours,planningDistance)].slice(0,Math.min(8,basics.days-1));
+  feasible.sort((a,b)=>Number(!mustSeeStatePark(a))-Number(!mustSeeStatePark(b))||Number(a.designation!=='state_park')-Number(b.designation!=='state_park')||neededDays(a)-neededDays(b)||C.miles(basics.start.point,C.point(a))-C.miles(basics.start.point,C.point(b)));
+  const anchor=feasible[0],anchorPoint=C.point(anchor);let near;
+  if(d.park){const span=100/69,lonSpan=span/Math.max(.3,Math.cos(anchorPoint[0]*Math.PI/180));const around=await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url,metadata').eq('designation','state_park').gte('latitude',anchorPoint[0]-span).lte('latitude',anchorPoint[0]+span).gte('longitude',anchorPoint[1]-lonSpan).lte('longitude',anchorPoint[1]+lonSpan).limit(1000));near=[...parks,...around.filter(p=>p.metadata?.coverage_status!=='inventory_record_needs_agency_validation')].filter(p=>p.id!==anchor.id&&C.miles(anchorPoint,C.point(p))<100);}else near=feasible.slice(1);
+  const preferStateParks=Boolean(d.code||d.park?.designation==='state_park');
+  chosen=[anchor,...C.chooseParks(near,anchorPoint,basics.end.point,Math.max(2,basics.days-neededDays(anchor)+2),basics.hours,planningDistance,preferStateParks)].slice(0,Math.min(8,basics.days-1));
  }
  if(!chosen.length)throw Error('No catalog route fits those driving preferences. Increase the distance or choose a closer ending point.');
  model={version:1,basics,stops:[],route:null};for(const p of chosen){say('Finding stays and attractions near '+p.name+'…');const stop=await createStop(p);
