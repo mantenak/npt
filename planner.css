@@ -29,3 +29,13 @@
 @media(max-width:650px){.np-param-grid{grid-template-columns:1fr}}
 
 .np-address-search{margin:10px 0;padding:10px;background:#fffdf8;border:1px solid #cbd8ce;border-radius:8px}.np-address-search>.btn{margin-top:8px}
+
+.np-campground-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 0 12px 10px;
+  margin: 0;
+  color: #40574c;
+  font-size: .8rem;
+}
