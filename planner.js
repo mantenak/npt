@@ -255,8 +255,26 @@ function preTripSearch(start,destination,vehicle,length){
  box.append(summary,intro,controls,addressPanel,help,filters,search,msg,results,selectedBox);kind.addEventListener('change',()=>{const isCamp=kind.value==='campground';filters.hidden=!isCamp;fullLabel.hidden=!isCamp;fitLabel.hidden=!isCamp;});refreshSelected();return {box,selected};
 }
 async function campsNear(point,radius=30){const rows=await query(db().rpc('npt_nearby_campgrounds',{center_lat:point[0],center_lon:point[1],radius_miles:radius,required_rv_length_ft:null,require_full_hookups:false,include_unknown_fit:true,result_limit:100}).abortSignal(AbortSignal.timeout(15000)));if(!rows.length)return [];const details=await query(db().from('npt_campgrounds').select('*').in('id',rows.map(x=>x.id)).abortSignal(AbortSignal.timeout(15000)));const dist=new Map(rows.map(x=>[x.id,x.distance_miles]));return details.map(c=>({...c,distance_miles:dist.get(c.id)})).sort((a,b)=>a.distance_miles-b.distance_miles);}
+async function mappedRoadDistances(camps,point,maxMiles=30){
+ for(let offset=0;offset<camps.length;offset+=40){
+  const batch=camps.slice(offset,offset+40),pts=[point,...batch.map(C.point)];
+  try{
+   const data=await json('https://routing.openstreetmap.de/routed-car/table/v1/driving/'+pts.map(p=>p[1]+','+p[0]).join(';')+'?sources=0&annotations=distance');
+   batch.forEach((c,i)=>{const meters=data.distances?.[0]?.[i+1];c.road_miles=meters==null?null:meters/1609.344;});
+  }catch{batch.forEach(c=>c.road_miles=null);}
+ }
+ return camps.filter(c=>c.road_miles!=null&&c.road_miles<=maxMiles);
+}
 async function createStop(park){
- const camps=await campsNear(C.point(park),50),fits=camps.filter(c=>{return C.fit(c,model.basics.vehicle).ok;});
+ const camps=await campsNear(C.point(park),50);
+ let fits=camps.filter(c=>C.fit(c,model.basics.vehicle).ok);
+ if(!fits.length){
+  try{
+   const mapped=await mappedCampgrounds(C.point(park),40);
+   const roadNearby=await mappedRoadDistances(mapped,C.point(park),30);
+   fits=roadNearby.filter(c=>C.fit(c,model.basics.vehicle).ok);
+  }catch{}
+ }
  fits.sort((a,b)=>Number(C.fit(a,model.basics.vehicle).unknown)-Number(C.fit(b,model.basics.vehicle).unknown)||(a.park_id===park.id?-1:0)-(b.park_id===park.id?-1:0)||a.distance_miles-b.distance_miles);
  const activities=park.id?(await parkSights(park,C.point(park))).slice(0,10):[];
  return {park,nights:2,campground:fits[0]||null,activities:activities.slice(0,5),options:activities,notes:''};
