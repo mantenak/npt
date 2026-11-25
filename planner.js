@@ -77,6 +77,25 @@ function roadTripPlace(place){
 function attractionWords(value){
  return String(value||'').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().match(/[\p{L}\p{N}]+/gu)||[];
 }
+// Prefer catalog priorities when present, then shortlist recognizable park features.
+function sightPriority(place){
+ const text=place.name||'';
+ if(place.metadata?.must_see===true||place.must_see===true)return 0;
+ if(/\b(old faithful|grand prismatic spring|delicate arch|gateway arch(?: monument)?|half dome|yosemite falls|tunnel view|angels landing|the narrows|cadillac mountain|going.to.the.sun road|logan pass|lake louise|moraine lake|crater lake rim|sunrise point|sunset point|mather point|denali|mount rainier|hurricane ridge|mesa arch|badlands loop|giant forest|general sherman|crystal cave|custer state park wildlife loop)\b/i.test(text)&&
+    !/\b(visitor center|shuttle|parking|campground|permit|webcam)\b/i.test(text))return 1;
+ if(place.attraction_type==='landmark'||/\b(geyser|waterfall|falls|natural bridge|arch|overlook|viewpoint|scenic drive|caverns?|summit)\b/i.test(text))return 2;
+ if(/\b(visitor center|picnic area|visitor contact|visitor centre)\b/i.test(text))return 5;
+ return 3;
+}
+function visitMinutes(place){
+ const value=Number(place.duration_minutes);
+ return value>0&&Number.isFinite(value)?value:null;
+}
+async function parkSights(park,point){
+ if(!park?.id)return attractionCandidates(point,25);
+ const rows=await query(parkAttractions().eq('park_id',park.id).order('name').limit(1000));
+ return rankAttractions(rows,'',point);
+}
 function rankAttractions(rows,term='',point=null){
  const words=attractionWords(term),seen=new Set();
  const eligible=rows.filter(place=>{
@@ -88,11 +107,8 @@ function rankAttractions(rows,term='',point=null){
   seen.add(key);return true;
  });
  function priority(place){
-  if(words.length&&attractionWords(place.name).join(' ')===words.join(' '))return 0;
-  if(place.attraction_type==='landmark')return 1;
-  if(place.designation)return 2;
-  if(/^(visit|explore|hike|tour|ride|see|discover)\b/i.test(place.name))return 4;
-  return 3;
+  if(words.length&&attractionWords(place.name).join(' ')===words.join(' '))return -1;
+  return sightPriority(place);
  }
  return eligible.sort((a,b)=>priority(a)-priority(b)||(point?C.miles(point,C.point(a))-C.miles(point,C.point(b)):0)||a.name.localeCompare(b.name));
 }
@@ -165,25 +181,27 @@ function showForm(){
   const d=basics.destination;
   let targets=d.park?[d.park]:await query(db().from('npt_parks').select('id,name,region,latitude,longitude,designation,official_url').in('designation',['national_park','national_park_canada','state_park']).or('region.eq.'+d.code+',region.eq.'+d.name).not('latitude','is',null).limit(500));
   if(!targets.length)throw Error('No mapped parks found for that destination in the catalog. Try a specific park.');
-  targets.sort((a,b)=>C.miles(basics.start.point,C.point(a))-C.miles(basics.start.point,C.point(b)));
-  const anchor=targets[0],near= d.park?[...parks,...state].filter(p=>p.id!==anchor.id&&C.miles(C.point(p),C.point(anchor))<100):targets.slice(1);
-  const transit=C.miles(basics.start.point,C.point(anchor))+C.miles(C.point(anchor),basics.end.point);
-  const needed=Math.ceil(transit*1.3/Math.min(planningDistance,(basics.hours||24)*45))+2;
-  if(needed>basics.days)throw Error('This destination needs roughly '+needed+' days at your driving preference, including time to visit. Increase trip days or driving distance, or select a closer destination.');
-  chosen=[anchor,...C.chooseParks(near,C.point(anchor),basics.end.point,Math.max(2,basics.days-Math.ceil(transit*1.3/planningDistance)),basics.hours,planningDistance)].slice(0,Math.min(8,basics.days-1));
+  const driveBudget=Math.min(planningDistance,(basics.hours||24)*45);
+  const neededDays=p=>Math.ceil((C.miles(basics.start.point,C.point(p))+C.miles(C.point(p),basics.end.point))*1.3/driveBudget)+2;
+  const feasible=targets.filter(p=>neededDays(p)<=basics.days);
+  if(!feasible.length)throw Error('The closest matching destination needs more days at your driving preferences. Increase trip days or choose a closer destination.');
+  feasible.sort((a,b)=>Number(a.designation==='state_park')-Number(b.designation==='state_park')||
+   neededDays(a)-neededDays(b)||C.miles(basics.start.point,C.point(a))-C.miles(basics.start.point,C.point(b)));
+  const anchor=feasible[0],near=d.park?[...parks,...state].filter(p=>p.id!==anchor.id&&C.miles(C.point(p),C.point(anchor))<100):feasible.slice(1);
+  chosen=[anchor,...C.chooseParks(near,C.point(anchor),basics.end.point,Math.max(2,basics.days-neededDays(anchor)+2),basics.hours,planningDistance)].slice(0,Math.min(8,basics.days-1));
  }
  if(!chosen.length)throw Error('No catalog route fits those driving preferences. Increase the distance or choose a closer ending point.');
  model={version:1,basics,stops:[],route:null};for(const p of chosen){say('Finding stays and attractions near '+p.name+'…');const stop=await createStop(p);
   const anchor=basics.destination;
   if(anchor?.type && p===anchor.park){
-   if(anchor.type==='attraction'){stop.activities=[anchor.place];stop.options=[anchor.place];}
+   if(anchor.type==='attraction'){stop.options=[anchor.place,...stop.options.filter(a=>a.id!==anchor.place.id)];stop.activities=[anchor.place];}
    else {stop.campground=anchor.place;stop.selectedCamp=true;if(anchor.site){stop.selectedSite=anchor.site;stop.notes='Preferred campsite: '+anchor.name;}}
   }
   model.stops.push(stop);}
  const selected=discovery.selected;for(const camp of selected.filter(x=>x.kind==='campground').map(x=>x.place)){const nearby=model.stops.map(s=>({s,d:C.miles(C.point(s.park),C.point(camp))})).filter(x=>!x.s.selectedCamp).sort((a,b)=>a.d-b.d);if(nearby[0]&&nearby[0].d<=100){nearby[0].s.campground=camp;nearby[0].s.selectedCamp=true;}else model.stops.push({park:{id:null,name:camp.name,region:camp.region,latitude:camp.latitude,longitude:camp.longitude},nights:1,campground:camp,activities:[],options:[],notes:'Selected before building the itinerary.'});}
  for(const address of selected.filter(x=>x.kind==='address').map(x=>x.place)){model.stops.push({park:{id:null,name:address.name,region:address.region,latitude:address.latitude,longitude:address.longitude},nights:1,kind:'address',addressOnly:true,campground:null,activities:[],options:[],notes:'Address stop selected before building the itinerary.'});}
  for(const attraction of selected.filter(x=>x.kind==='attraction').map(x=>x.place)){const exists=model.stops.some(s=>s.park?.name?.toLowerCase()===attraction.name.toLowerCase()||s.activities?.some(a=>a.name?.toLowerCase()===attraction.name.toLowerCase()));if(exists)continue;model.stops.push({park:{id:null,name:attraction.name,region:attraction.region,latitude:attraction.latitude,longitude:attraction.longitude,official_url:attraction.official_url},nights:0,campground:null,activities:[attraction],options:[attraction],attractionOnly:true,notes:'Must-stop attraction selected before building the itinerary.'});}
- const nightStops=model.stops.filter(s=>!s.attractionOnly),nights=basics.days-1;if(nightStops.length>nights)throw Error('There are more overnight stops than available nights. Increase the trip length or remove a selected campground.');nightStops.forEach((s,i)=>s.nights=Math.floor(nights/nightStops.length)+(i<nights%nightStops.length?1:0));model.stops=sequenceStops(model.stops,basics.start.point,basics.end.point);dirty=true;await render();});};
+ const nightStops=model.stops.filter(s=>!s.attractionOnly),nights=basics.days-1;if(nightStops.length>nights)throw Error('There are more overnight stops than available nights. Increase the trip length or remove a selected campground.');nightStops.forEach((s,i)=>{s.nights=Math.floor(nights/nightStops.length)+(i<nights%nightStops.length?1:0);s.activities=s.options.slice(0,Math.min(5,s.nights));});model.stops=sequenceStops(model.stops,basics.start.point,basics.end.point);dirty=true;await render();});};
 }
 function preTripSearch(start,destination,vehicle,length){
  const box=el('details',null,{class:'np-search np-pretrip-search'}),summary=el('summary','Find places before building the trip'),intro=el('p','Search for campsites or attractions, or enter a full street address to add a stop such as a friend’s home.',{class:'np-muted'}),kind=select([['campground','Campsites'],['attraction','Attractions'],['address','Direct address']],'campground'),term=input('search','',{placeholder:'Search by name','aria-label':'Search places by name'}),radius=select([['15','Within 15 miles'],['30','Within 30 miles'],['50','Within 50 miles'],['100','Within 100 miles'],['500','Whole state']],'30'),full=input('checkbox'),fit=input('checkbox'),results=el('div',null,{class:'np-discovery-results'}),selectedBox=el('div',null,{class:'np-selected-places'}),address=locationField('Full street address'),addressPanel=el('div',null,{class:'np-address-search',hidden:''}),selected=[],msg=el('p','Choose Campsites or Attractions, then type to see suggestions. Choose Direct address to add an address stop.',{role:'status'});
@@ -210,7 +228,7 @@ async function campsNear(point,radius=30){const rows=await query(db().rpc('npt_n
 async function createStop(park){
  const camps=await campsNear(C.point(park),50),fits=camps.filter(c=>{const f=C.fit(c,model.basics.vehicle);return f.ok&&!f.unknown;});
  fits.sort((a,b)=>Number(C.fit(a,model.basics.vehicle).unknown)-Number(C.fit(b,model.basics.vehicle).unknown)||(a.park_id===park.id?-1:0)-(b.park_id===park.id?-1:0)||a.distance_miles-b.distance_miles);
- const activities=park.id?rankAttractions(await query(parkAttractions().eq('park_id',park.id).order('latitude',{ascending:false,nullsFirst:false}).limit(1000))).slice(0,10):[];
+ const activities=park.id?(await parkSights(park,C.point(park))).slice(0,10):[];
  return {park,nights:2,campground:fits[0]||null,activities:activities.slice(0,5),options:activities,notes:''};
 }
 function stopPoint(s){return s.campground?.latitude!=null&&s.campground?.longitude!=null?C.point(s.campground):C.point(s.park);}
@@ -239,7 +257,7 @@ async function gapOptions(gap,kind,excluded=new Set()){
  const coords=direct.geometry.coordinates.map(p=>[p[1],p[0]]),preferredDistance=model.basics.distance??((model.basics.hours||6)*45),preferred=Math.min(.75,Math.max(.25,preferredDistance/(direct.distance/1609.344))),samples=roadSamples(coords,[.25,preferred,.75]);
  const jobs=samples.flatMap(p=>kind==='campground'?[campsNear(p,40),mappedCampgrounds(p,40)]:[attractionCandidates(p)]),outcomes=await Promise.allSettled(jobs);let candidates=[];
  for(const r of outcomes)if(r.status==='fulfilled')for(const c of r.value){if(excluded.has(c.name.toLowerCase())||kind==='campground'&&!C.fit(c,model.basics.vehicle).ok)continue;if(!candidates.some(x=>x.name.toLowerCase()===c.name.toLowerCase()&&C.miles(C.point(x),C.point(c))<.5))candidates.push(c);}
- const targetMiles=Math.min(model.basics.distance??((model.basics.hours||6)*45),direct.distance/1609.344/2);candidates.sort((a,b)=>{const score=c=>Math.abs(C.miles(gap.from.point,C.point(c))-targetMiles)+2*(C.miles(gap.from.point,C.point(c))+C.miles(C.point(c),gap.to.point)-C.miles(gap.from.point,gap.to.point));return score(a)-score(b);});candidates=candidates.slice(0,24);
+ const targetMiles=Math.min(model.basics.distance??((model.basics.hours||6)*45),direct.distance/1609.344/2);candidates.sort((a,b)=>{const score=c=>Math.abs(C.miles(gap.from.point,C.point(c))-targetMiles)+2*(C.miles(gap.from.point,C.point(c))+C.miles(C.point(c),gap.to.point)-C.miles(gap.from.point,gap.to.point));return (kind==='attraction'?sightPriority(a)-sightPriority(b):0)||score(a)-score(b);});candidates=candidates.slice(0,24);
  if(!candidates.length)return {choices:[],unavailable:outcomes.every(x=>x.status==='rejected'),partial:false,direct};
  const pts=[gap.from.point,...candidates.map(C.point),gap.to.point];let table=null;try{table=await json('https://routing.openstreetmap.de/routed-car/table/v1/driving/'+pts.map(p=>p[1]+','+p[0]).join(';')+'?annotations=distance,duration');}catch{}
  const choices=candidates.map((c,i)=>{const a=table?.distances?.[0]?.[i+1],b=table?.distances?.[i+1]?.[pts.length-1];return {c,a,b,firstSeconds:table?.durations?.[0]?.[i+1],secondSeconds:table?.durations?.[i+1]?.[pts.length-1],extra:a!=null&&b!=null?Math.max(0,a+b-direct.distance):null};});choices.sort((a,b)=>{const score=x=>x.extra==null?Infinity:x.extra/1609.344*2+Math.abs(x.a/1609.344-targetMiles);return score(a)-score(b);});
@@ -268,7 +286,7 @@ function exceedsDriveLimits(meters, seconds, basics){
 function reviewedStop(place,kind){
  return {park:{name:place.name,latitude:place.latitude,longitude:place.longitude,region:place.region},
   campground:kind==='campground'?place:null,nights:kind==='campground'?1:0,
-  activities:[],options:[],notes:'',attractionOnly:kind==='attraction',kind};
+  activities:kind==='attraction'?[place]:[],options:kind==='attraction'?[place]:[],notes:'',attractionOnly:kind==='attraction',kind};
 }
 async function reviewTrip(host){
  if(model.stops.some(s=>s.draft))throw Error('Finish or remove the empty stop rows before recalculating.');
@@ -283,11 +301,29 @@ async function reviewTrip(host){
  const existing=new Set(stops.flatMap(s=>[stopName(s),s.park?.name,...s.activities.map(a=>a.name)]).filter(Boolean).map(n=>n.toLowerCase()));
  for(const name of model.dismissedPlaces||[])existing.add(name);
  reviewedRoute.legs.forEach((leg,index)=>{
-  if(!exceedsDriveLimits(leg.distance,leg.duration,basics))return;
   const from=locations[index],to=locations[index+1];
-  groups.push({kind:'campground',index,title:'Break up '+from.name+' → '+to.name,
-   summary:Math.round(leg.distance/1609.344)+' miles · '+(leg.duration/3600).toFixed(1)+' hours',
-   load:()=>gapOptions({from,to},'campground',existing)});
+  const legLabel=from.name+' → '+to.name;
+  const summary=Math.round(leg.distance/1609.344)+' miles · '+(leg.duration/3600).toFixed(1)+' hours';
+  if(exceedsDriveLimits(leg.distance,leg.duration,basics)){
+   groups.push({kind:'campground',index,title:'Break up '+legLabel,summary,
+    load:async()=>{
+     const result=await gapOptions({from,to},'campground',existing);
+     const fits=({a,b,firstSeconds,secondSeconds})=>[a,b,firstSeconds,secondSeconds].every(Number.isFinite)&&
+      !exceedsDriveLimits(a,firstSeconds,basics)&&!exceedsDriveLimits(b,secondSeconds,basics);
+     result.choices.sort((a,b)=>Number(fits(b))-Number(fits(a)));
+     return result;
+    }});
+  }else if(leg.distance>=40*1609.344){
+   groups.push({kind:'sightStop',index,title:'Must-see stops along '+legLabel,summary,
+    load:async()=>{
+     const result=await gapOptions({from,to},'attraction',existing);
+     result.choices=result.choices.filter(({c,a,b,firstSeconds,secondSeconds})=>
+      sightPriority(c)<=2&&[a,b,firstSeconds,secondSeconds].every(Number.isFinite)&&
+      !exceedsDriveLimits(a+b,firstSeconds+secondSeconds,basics))
+      .sort((a,b)=>sightPriority(a.c)-sightPriority(b.c)||a.extra-b.extra);
+     return result;
+    }});
+  }
  });
  stops.forEach((s,index)=>{
   if(s.nights>0&&(!s.campground||!C.fit(s.campground,basics.vehicle).ok)){
@@ -296,9 +332,9 @@ async function reviewTrip(host){
      .filter(c=>!existing.has(c.name.toLowerCase())&&C.fit(c,basics.vehicle).ok)
      .slice(0,4).map(c=>({c,nearby:true}))})});
   }
-  if(s.nights>0&&s.activities.length<s.nights){
-   groups.push({kind:'activity',index,title:'Optional things to do near '+s.park.name,
-    load:async()=>({choices:(await attractionCandidates(stopPoint(s),25))
+  if(s.nights>0){
+   groups.push({kind:'activity',index,title:'Must-see attractions at or near '+s.park.name,
+    load:async()=>({choices:(await parkSights(s.park,stopPoint(s)))
      .filter(c=>!existing.has(c.name.toLowerCase())).slice(0,3).map(c=>({c,nearby:true}))})});
   }
  });
@@ -313,7 +349,7 @@ async function reviewTrip(host){
   'Checked '+reviewedRoute.legs.length+' driving legs, including the final drive, and '+stops.length+' stops. Select any options you want to apply.'));
  for(const [i,group] of groups.entries()){
   const {choices,unavailable,partial}=group.result;
-  if(!choices.length&&group.kind==='activity'&&!unavailable)continue;
+  if(!choices.length&&['activity','sightStop'].includes(group.kind)&&!unavailable)continue;
   const section=el('section',null,{class:'np-result'});section.append(el('h4',group.title));
   if(group.summary)section.append(el('p',group.summary));
   if(partial)section.append(el('p','Some search sources were unavailable.'));
@@ -333,8 +369,8 @@ async function reviewTrip(host){
       (exceedsDriveLimits(a,firstSeconds,basics)||exceedsDriveLimits(b,secondSeconds,basics)?' · Still exceeds a driving limit':'')));
     }else if(!choice.nearby)option.append(el('p','Road comparison unavailable.'));
     else option.append(el('p',Math.round(C.miles(stopPoint(stops[group.index]),C.point(c)))+' mi straight-line from the stop'));
-    if(group.kind!=='activity')option.append(el('p',[C.fit(c,basics.vehicle).label,C.hookups(c),c.metadata?.campground_price_summary||'Nightly price unconfirmed',group.kind==='campground'?'Adds one night':'Keeps the planned nights'].join(' · ')));
-    else option.append(el('p',[c.category,c.duration_minutes!=null?c.duration_minutes+' min estimated visit':null].filter(Boolean).join(' · ')||'Visit duration unconfirmed'));
+    if(['campground','stay'].includes(group.kind))option.append(el('p',[C.fit(c,basics.vehicle).label,C.hookups(c),c.metadata?.campground_price_summary||'Nightly price unconfirmed',group.kind==='campground'?'Adds one night':'Keeps the planned nights'].join(' · ')));
+    else option.append(el('p',[c.npt_parks?.name,c.category,visitMinutes(c)!=null?visitMinutes(c)+' min estimated visit':'Visit duration unconfirmed',group.kind==='sightStop'?'No overnight stay':null].filter(Boolean).join(' · ')||'Visit duration unconfirmed'));
     option.append(link('Place details',c.reservation_url||c.official_url||c.metadata?.source_url));
     section.append(option);
     (group.inputs??=[]).push({radio,c});
@@ -353,7 +389,7 @@ async function reviewTrip(host){
    const key=selected.name.toLowerCase();
    if(picked.has(key))throw Error('Select '+selected.name+' only once.');
    picked.add(key);
-   if(group.kind==='campground')insertions.set(group.index,reviewedStop(selected,'campground'));
+   if(group.kind==='campground'||group.kind==='sightStop')insertions.set(group.index,reviewedStop(selected,group.kind==='sightStop'?'attraction':'campground'));
    else if(group.kind==='stay'){
     revised[group.index].campground=selected;
     revised[group.index].nightlyCost=null;
