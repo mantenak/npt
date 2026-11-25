@@ -4,13 +4,14 @@
 const pt=x=>Array.isArray(x)&&x.length===2&&x.every(Number.isFinite)?x:null;
 function miles(a,b){if(!pt(a)||!pt(b))return Infinity;const r=Math.PI/180,dlat=(b[0]-a[0])*r,dlon=(b[1]-a[1])*r;return 3958.76*2*Math.asin(Math.min(1,Math.sqrt(Math.sin(dlat/2)**2+Math.cos(a[0]*r)*Math.cos(b[0]*r)*Math.sin(dlon/2)**2)));}
 const point=p=>[Number(p.latitude),Number(p.longitude)];
-function chooseParks(parks,start,end,days,hours,distance=250){
+function chooseParks(parks,start,end,days,hours,distance=250,preferStateParks=false){
  hours=hours||Math.max(1,distance/45);
  const max=Math.min(12,Math.max(1,Math.floor((days-1)/3))),budget=Math.max(hours,days*hours*.45),chosen=[];let current=start,spent=0;
  const remaining=parks.filter(p=>p.latitude!=null&&p.longitude!=null&&miles(start,point(p))<days*hours*30);
  while(chosen.length<max){
   const feasible=remaining.filter(p=>!chosen.includes(p)).map(p=>({p,d:miles(current,point(p))*1.3/45,back:miles(point(p),end)*1.3/45})).filter(x=>x.d<=hours*1.5&&x.d*45<=distance*1.5&&spent+x.d+x.back<=budget);
-  feasible.sort((a,b)=>(a.d+a.back*.12+Math.max(0,a.d*45-distance)/30+(a.p.designation==='state_park'?1.2:0))-(b.d+b.back*.12+Math.max(0,b.d*45-distance)/30+(b.p.designation==='state_park'?1.2:0)));
+  const parkBias=p=>p.designation==='state_park'&&(p.metadata?.must_see===true||p.metadata?.trip_priority==='must_see'||p.metadata?.priority==='must_see')?-4:preferStateParks&&p.designation==='state_park'?-1.2:p.designation==='state_park'?1.2:0;
+  feasible.sort((a,b)=>(a.d+a.back*.12+Math.max(0,a.d*45-distance)/30+parkBias(a.p))-(b.d+b.back*.12+Math.max(0,b.d*45-distance)/30+parkBias(b.p)));
   if(!feasible.length)break;
   const x=feasible[0];chosen.push(x.p);spent+=x.d;current=point(x.p);
  }
