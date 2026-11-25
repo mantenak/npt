@@ -1,0 +1,60 @@
+[hidden]{display:none!important}
+.npt-brand{display:flex;align-items:center;gap:10px;background:none;border:0;color:white;padding:0;font-weight:800;text-align:left}
+.top .topactions .topbtn{display:block}
+.tripactions{flex-wrap:wrap}
+#publicSection{margin-top:0}
+#publicSection .sectionhead h3{font-size:28px}
+#publicSection .publiclist{grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr))}
+#publicSection .tripcard{padding:20px}
+.npt-stay-head{display:flex;justify-content:space-between;align-items:start;gap:10px}
+.npt-stay-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin-top:10px}
+.npt-stay-fields dt{color:var(--muted);font-size:12px}.npt-stay-fields dd{margin:0}
+.npt-replace{padding:10px 0}.npt-replace input,.npt-replace select{width:100%}
+.npt-walk-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(240px,1fr);gap:15px}
+.npt-map{height:65vh;min-height:345px;background:#e6eee7;border-radius:14px;overflow:hidden}
+.npt-map-key,.npt-walk-nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.npt-walk-nav select{padding:8px}
+.npt-walk-panel{max-height:65vh;overflow:auto}
+.npt-map .leaflet-div-icon{border:0;background:none}
+.npt-map-pin{display:grid;place-items:center;border-radius:50%;background:#173c32;color:white;border:2px solid white;width:25px;height:25px;font-size:10px;font-weight:800}
+.npt-map-pin.current{background:#a64f24}
+.npt-map-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.npt-map a,.npt-stay a{color:var(--forest)}
+@media(max-width:720px){.npt-walk-layout{grid-template-columns:1fr}.npt-map{height:54vh}.npt-walk-panel{max-height:none}.topin{gap:8px}.topbtn{padding:7px 8px}.npt-brand{font-size:13px}.npt-brand .logo{width:34px;height:34px}}
+
+
+/* Keep the original trip logo visible throughout navigation. */
+.top{padding:10px 20px}.topin{max-width:1300px}.npt-brand{gap:15px;font-size:21px;line-height:1.15}.npt-brand .npt-logo{width:72px;height:72px;flex:none;border-radius:16px;object-fit:contain;background:#f5f1e8;box-shadow:0 2px 8px #0002}.np-editor-brand{display:flex;align-items:center;gap:14px}.np-editor-brand img{width:68px;height:68px;border-radius:15px;object-fit:contain}.np-editor-brand-name{font-size:18px;font-weight:800}.np-editor-brand h2{padding-left:15px;border-left:1px solid #cad5c9}
+@media(max-width:720px){.top{padding:9px 12px}.topin{flex-wrap:wrap;gap:9px}.npt-brand{font-size:18px}.npt-brand .npt-logo{width:58px;height:58px}.topactions{gap:5px}.topbtn{font-size:12px}.np-editor-brand{gap:9px;flex-wrap:wrap}.np-editor-brand img{width:52px;height:52px}.np-editor-brand-name{font-size:16px}.np-editor-brand h2{font-size:17px}.np-head{align-items:center}}
+@media(max-width:470px){.topactions{width:100%;justify-content:flex-end}.np-editor-brand h2{width:100%;padding:0;border:0}.np-editor-brand img{width:48px;height:48px}}
+
+.npt-home-brand {
+  height: clamp(200px, 35vw, 348px);
+  overflow: hidden;
+  margin-bottom: 24px;
+  border-radius: 16px;
+  background: #314438;
+}
+.npt-home-brand img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+#publicSection .sectionhead h3 {
+  font-size: 1rem;
+  font-weight: 650;
+}
+#publicSection .tripcard {
+  box-shadow: none;
+}
+.npt-vehicle-pin {
+  width: 36px;
+  height: 36px;
+  box-shadow: 0 1px 4px #0004;
+}
+.npt-vehicle-pin svg {
+  width: 27px;
+  height: 19px;
+}
