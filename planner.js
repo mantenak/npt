@@ -234,19 +234,148 @@ function draftEditor(s,host){const gap=gapFor(s);host.append(el('strong','Betwee
  host.append(btn('Remove empty row',()=>run(async()=>{model.stops.splice(model.stops.indexOf(s),1);dirty=true;await render();})));
 }
 async function fillDraft(s,place){if(C.buildTrip({...model,stops:resolvedStops()}).length+s.nights>120)throw Error('This stop would exceed 120 days. Reduce other nights first.');s.park={id:null,name:place.name,latitude:place.latitude,longitude:place.longitude,official_url:place.official_url};s.campground=s.kind==='campground'?place:null;s.activities=s.kind==='attraction'?[place]:[];s.options=[...s.activities];if(s.kind==='attraction')s.nights=0;delete s.draft;expandedStops.add(s);changed();focusStop=s;await render();say('Stop added in this position. Road distances and dates updated.');}
-async function suggestGap(s,host){
- const gap=gapFor(s);host.replaceChildren(el('p','Finding the road route between these stops…',{role:'status'}));lock(true);
+async function gapOptions(gap,kind,excluded=new Set()){
  const routeData=await json('https://routing.openstreetmap.de/routed-car/route/v1/driving/'+[gap.from.point,gap.to.point].map(p=>p[1]+','+p[0]).join(';')+'?overview=full&geometries=geojson');const direct=routeData.routes?.[0];if(!direct)throw Error('No road route found between these stops. Choose an address instead.');
  const coords=direct.geometry.coordinates.map(p=>[p[1],p[0]]),preferredDistance=model.basics.distance??((model.basics.hours||6)*45),preferred=Math.min(.75,Math.max(.25,preferredDistance/(direct.distance/1609.344))),samples=roadSamples(coords,[.25,preferred,.75]);
- host.replaceChildren(el('p','Looking near the road route for '+(s.kind==='campground'?'campgrounds':'attractions')+'…',{role:'status'}));const jobs=samples.flatMap(p=>s.kind==='campground'?[campsNear(p,40),mappedCampgrounds(p,40)]:[attractionCandidates(p)]),outcomes=await Promise.allSettled(jobs);let candidates=[];
- for(const r of outcomes)if(r.status==='fulfilled')for(const c of r.value){if(s.kind==='campground'&&!C.fit(c,model.basics.vehicle).ok)continue;if(!candidates.some(x=>x.name.toLowerCase()===c.name.toLowerCase()&&C.miles(C.point(x),C.point(c))<.5))candidates.push(c);}
+ const jobs=samples.flatMap(p=>kind==='campground'?[campsNear(p,40),mappedCampgrounds(p,40)]:[attractionCandidates(p)]),outcomes=await Promise.allSettled(jobs);let candidates=[];
+ for(const r of outcomes)if(r.status==='fulfilled')for(const c of r.value){if(excluded.has(c.name.toLowerCase())||kind==='campground'&&!C.fit(c,model.basics.vehicle).ok)continue;if(!candidates.some(x=>x.name.toLowerCase()===c.name.toLowerCase()&&C.miles(C.point(x),C.point(c))<.5))candidates.push(c);}
  const targetMiles=Math.min(model.basics.distance??((model.basics.hours||6)*45),direct.distance/1609.344/2);candidates.sort((a,b)=>{const score=c=>Math.abs(C.miles(gap.from.point,C.point(c))-targetMiles)+2*(C.miles(gap.from.point,C.point(c))+C.miles(C.point(c),gap.to.point)-C.miles(gap.from.point,gap.to.point));return score(a)-score(b);});candidates=candidates.slice(0,24);
- if(!candidates.length){host.replaceChildren(el('p',outcomes.every(x=>x.status==='rejected')?'Search services are unavailable. Retry or choose Address.':'No matching mapped places found along this route. Try the other stop type or choose Address.'));return;}
- host.replaceChildren(el('p','Comparing driving distances through '+candidates.length+' places…',{role:'status'}));const pts=[gap.from.point,...candidates.map(C.point),gap.to.point];let table=null;try{table=await json('https://routing.openstreetmap.de/routed-car/table/v1/driving/'+pts.map(p=>p[1]+','+p[0]).join(';')+'?annotations=distance,duration');}catch{}
- const choices=candidates.map((c,i)=>{const a=table?.distances?.[0]?.[i+1],b=table?.distances?.[i+1]?.[pts.length-1];return {c,a,b,extra:a!=null&&b!=null?Math.max(0,a+b-direct.distance):null};});choices.sort((a,b)=>{const score=x=>x.extra==null?Infinity:x.extra/1609.344*2+Math.abs(x.a/1609.344-targetMiles);return score(a)-score(b);});
- host.replaceChildren(el('p',gap.from.name+' → '+gap.to.name+' · '+Math.round(direct.distance/1609.344)+' road miles without this stop.'),el('small','Suggestions near three points along the road route, ranked by added driving and a useful driving break. Confirm access, RV fit and availability. '+(outcomes.some(x=>x.status==='rejected')?'Some search sources were unavailable.':'')));
- for(const {c,a,b,extra} of choices.slice(0,12)){const card=el('div',null,{class:'np-result'});card.append(el('h4',c.name),el('p',extra==null?'Road comparison unavailable — distances will be retried when selected.':Math.round(a/1609.344)+' mi from '+gap.from.name+' · '+Math.round(b/1609.344)+' mi to '+gap.to.name+' · '+Math.round(extra/1609.344)+' extra mi'));if(s.kind==='campground')card.append(el('p',C.fit(c,model.basics.vehicle).label+' · '+C.hookups(c)));card.append(link('Place details',c.reservation_url||c.official_url||c.metadata?.source_url),btn('Use this '+(s.kind==='campground'?'campground':'attraction'),()=>run(()=>fillDraft(s,c))));host.append(card);}
+ if(!candidates.length)return {choices:[],unavailable:outcomes.every(x=>x.status==='rejected'),partial:false,direct};
+ const pts=[gap.from.point,...candidates.map(C.point),gap.to.point];let table=null;try{table=await json('https://routing.openstreetmap.de/routed-car/table/v1/driving/'+pts.map(p=>p[1]+','+p[0]).join(';')+'?annotations=distance,duration');}catch{}
+ const choices=candidates.map((c,i)=>{const a=table?.distances?.[0]?.[i+1],b=table?.distances?.[i+1]?.[pts.length-1];return {c,a,b,firstSeconds:table?.durations?.[0]?.[i+1],secondSeconds:table?.durations?.[i+1]?.[pts.length-1],extra:a!=null&&b!=null?Math.max(0,a+b-direct.distance):null};});choices.sort((a,b)=>{const score=x=>x.extra==null?Infinity:x.extra/1609.344*2+Math.abs(x.a/1609.344-targetMiles);return score(a)-score(b);});
+ return {choices,partial:outcomes.some(x=>x.status==='rejected'),direct};
+}
+async function suggestGap(s,host){
+ const gap=gapFor(s),kind=s.kind;
+ host.replaceChildren(el('p','Finding suggestions along this driving leg…',{role:'status'}));
+ const {choices,direct,partial,unavailable}=await gapOptions(gap,kind);
+ if(!choices.length){
+  host.replaceChildren(el('p',unavailable?'Search services are unavailable. Retry or choose Address.':'No matching mapped places found along this route.'));return;
+ }
+ host.replaceChildren(el('p',gap.from.name+' → '+gap.to.name+' · '+Math.round(direct.distance/1609.344)+' road miles without this stop.'),el('small','Suggestions near three points along the road route, ranked by added driving and a useful driving break. Confirm access, RV fit and availability. '+(partial?'Some search sources were unavailable.':'')));
+ for(const {c,a,b,extra} of choices.slice(0,12)){const card=el('div',null,{class:'np-result'});card.append(el('h4',c.name),el('p',extra==null?'Road comparison unavailable — distances will be retried when selected.':Math.round(a/1609.344)+' mi from '+gap.from.name+' · '+Math.round(b/1609.344)+' mi to '+gap.to.name+' · '+Math.round(extra/1609.344)+' extra mi'));if(kind==='campground')card.append(el('p',C.fit(c,model.basics.vehicle).label+' · '+C.hookups(c)));card.append(link('Place details',c.reservation_url||c.official_url||c.metadata?.source_url),btn('Use this '+(kind==='campground'?'campground':'attraction'),()=>run(()=>fillDraft(s,c))));host.append(card);}
  host.append(link('Map data © OpenStreetMap contributors','https://www.openstreetmap.org/copyright'));
+}
+
+function dismissPlace(name){
+ const key=name.toLowerCase();
+ model.dismissedPlaces=[...new Set([...(model.dismissedPlaces||[]),key])];
+}
+function exceedsDriveLimits(meters, seconds, basics){
+ return (basics.distance!=null&&meters/1609.344>basics.distance)||
+  (basics.hours!=null&&seconds/3600>basics.hours);
+}
+function reviewedStop(place,kind){
+ return {park:{name:place.name,latitude:place.latitude,longitude:place.longitude,region:place.region},
+  campground:kind==='campground'?place:null,nights:kind==='campground'?1:0,
+  activities:[],options:[],notes:'',attractionOnly:kind==='attraction',kind};
+}
+async function reviewTrip(host){
+ if(model.stops.some(s=>s.draft))throw Error('Finish or remove the empty stop rows before recalculating.');
+ if(!model.stops.length)throw Error('Add a stop before recalculating.');
+ const current=model, stops=[...model.stops], basics=model.basics;
+ host.hidden=false;
+ host.replaceChildren(el('h3','Recalculate trip'),el('p','Checking every driving leg and planned stop…',{role:'status'}));
+ host.scrollIntoView({block:'nearest'});
+ const reviewedRoute=await calculateRoute(basics,stops);
+ const locations=[basics.start,...stops.map(s=>({name:stopName(s),point:stopPoint(s)})),basics.end];
+ const groups=[];
+ const existing=new Set(stops.flatMap(s=>[stopName(s),s.park?.name,...s.activities.map(a=>a.name)]).filter(Boolean).map(n=>n.toLowerCase()));
+ for(const name of model.dismissedPlaces||[])existing.add(name);
+ reviewedRoute.legs.forEach((leg,index)=>{
+  if(!exceedsDriveLimits(leg.distance,leg.duration,basics))return;
+  const from=locations[index],to=locations[index+1];
+  groups.push({kind:'campground',index,title:'Break up '+from.name+' → '+to.name,
+   summary:Math.round(leg.distance/1609.344)+' miles · '+(leg.duration/3600).toFixed(1)+' hours',
+   load:()=>gapOptions({from,to},'campground',existing)});
+ });
+ stops.forEach((s,index)=>{
+  if(s.nights>0&&(!s.campground||!C.fit(s.campground,basics.vehicle).ok)){
+   groups.push({kind:'stay',index,title:'Choose a campground for '+s.park.name,
+    load:async()=>({choices:(await campsNear(stopPoint(s),30))
+     .filter(c=>!existing.has(c.name.toLowerCase())&&C.fit(c,basics.vehicle).ok)
+     .slice(0,4).map(c=>({c,nearby:true}))})});
+  }
+  if(s.nights>0&&s.activities.length<s.nights){
+   groups.push({kind:'activity',index,title:'Optional things to do near '+s.park.name,
+    load:async()=>({choices:(await attractionCandidates(stopPoint(s),25))
+     .filter(c=>!existing.has(c.name.toLowerCase())).slice(0,3).map(c=>({c,nearby:true}))})});
+  }
+ });
+ for(let start=0;start<groups.length;start+=3){
+  const batch=groups.slice(start,start+3);
+  await Promise.all(batch.map(async group=>{
+   try{group.result=await group.load();}catch{group.result={choices:[],unavailable:true};}
+  }));
+ }
+ if(model!==current||!host.isConnected)return;
+ host.replaceChildren(el('h3','Review proposed changes'),el('p',
+  'Checked '+reviewedRoute.legs.length+' driving legs, including the final drive, and '+stops.length+' stops. Select any options you want to apply.'));
+ for(const [i,group] of groups.entries()){
+  const {choices,unavailable,partial}=group.result;
+  if(!choices.length&&group.kind==='activity'&&!unavailable)continue;
+  const section=el('section',null,{class:'np-result'});section.append(el('h4',group.title));
+  if(group.summary)section.append(el('p',group.summary));
+  if(partial)section.append(el('p','Some search sources were unavailable.'));
+  if(!choices.length){
+   section.append(el('p',unavailable?'Search unavailable. Try recalculating again.':'No suitable catalog or mapped candidates were found.'));
+  }else{
+   const keep=input('radio','',{name:'npt-review-'+i,checked:''});keep.checked=true;
+   const skip=el('label',null,{class:'np-check'});skip.append(keep,' Leave as planned');section.append(skip);
+   for(const choice of choices.slice(0,4)){
+    const {c,a,b,extra,firstSeconds,secondSeconds}=choice;
+    const radio=input('radio',c.name,{name:'npt-review-'+i});
+    const label=el('label',null,{class:'np-check'});label.append(radio,' '+c.name);
+    const option=el('div',null,{class:'np-result'});option.append(label);
+    if(extra!=null&&Number.isFinite(firstSeconds)&&Number.isFinite(secondSeconds)){
+     option.append(el('p',Math.round(a/1609.344)+' mi / '+(firstSeconds/3600).toFixed(1)+' hr, then '+
+      Math.round(b/1609.344)+' mi / '+(secondSeconds/3600).toFixed(1)+' hr · '+Math.round(extra/1609.344)+' added road mi'+
+      (exceedsDriveLimits(a,firstSeconds,basics)||exceedsDriveLimits(b,secondSeconds,basics)?' · Still exceeds a driving limit':'')));
+    }else if(!choice.nearby)option.append(el('p','Road comparison unavailable.'));
+    else option.append(el('p',Math.round(C.miles(stopPoint(stops[group.index]),C.point(c)))+' mi straight-line from the stop'));
+    if(group.kind!=='activity')option.append(el('p',[C.fit(c,basics.vehicle).label,C.hookups(c),c.metadata?.campground_price_summary||'Nightly price unconfirmed',group.kind==='campground'?'Adds one night':'Keeps the planned nights'].join(' · ')));
+    else option.append(el('p',[c.category,c.duration_minutes!=null?c.duration_minutes+' min estimated visit':null].filter(Boolean).join(' · ')||'Visit duration unconfirmed'));
+    option.append(link('Place details',c.reservation_url||c.official_url||c.metadata?.source_url));
+    section.append(option);
+    (group.inputs??=[]).push({radio,c});
+   }
+  }
+  host.append(section);
+ }
+ if(!host.querySelector('section'))host.append(el('p','No additions are proposed for the current route and stops.'));
+ const buttons=el('div',null,{class:'np-actions'});
+ buttons.append(btn('Apply selected changes',()=>run(async()=>{
+  const revised=stops.map(s=>({...s,activities:[...s.activities],options:[...s.options||[]]}));
+  const insertions=new Map(),picked=new Set();
+  for(const group of groups){
+   const selected=group.inputs?.find(item=>item.radio.checked)?.c;
+   if(!selected)continue;
+   const key=selected.name.toLowerCase();
+   if(picked.has(key))throw Error('Select '+selected.name+' only once.');
+   picked.add(key);
+   if(group.kind==='campground')insertions.set(group.index,reviewedStop(selected,'campground'));
+   else if(group.kind==='stay'){
+    revised[group.index].campground=selected;
+    revised[group.index].nightlyCost=null;
+   }
+   else{
+    revised[group.index].activities.push(selected);
+    if(!revised[group.index].options.some(a=>a.id===selected.id))revised[group.index].options.push(selected);
+   }
+  }
+  const proposed=[];
+  revised.forEach((s,i)=>{if(insertions.has(i))proposed.push(insertions.get(i));proposed.push(s);});
+  if(insertions.has(revised.length))proposed.push(insertions.get(revised.length));
+  if(proposed.length>100||C.buildTrip({...current,stops:proposed}).length>120)throw Error('Select fewer overnight additions to stay within 100 stops and 120 days.');
+  const routingChanged=insertions.size||groups.some(g=>g.kind==='stay'&&g.inputs?.some(i=>i.radio.checked));
+  const nextRoute=routingChanged?await calculateRoute(basics,proposed):reviewedRoute;
+  if(model!==current||!host.isConnected)return;
+  model.stops=proposed;model.route=nextRoute;model.legacyRoutingUnchanged=false;
+  geometry=nextRoute.geometry;dirty=true;await render();
+  const remaining=nextRoute.legs.filter(l=>exceedsDriveLimits(l.distance,l.duration,basics)).length;
+  say('Recalculated draft. '+(remaining?remaining+' driving legs still exceed your preferences. ':'')+'Save to keep these changes.');
+ }),true),btn('Cancel review',()=>{host.hidden=true;host.replaceChildren();}));
+ host.append(buttons);
 }
 
 async function render(){
@@ -256,10 +385,11 @@ async function render(){
  if(!model.route){say('Calculating roads and driving distances…');try{await route(false);}catch(e){routingError=e.message;}}
  if(!root||op!==renderOp||model!==renderModel)return;
  map?.remove();map=null;body.replaceChildren();const t=C.buildTrip({...model,stops:resolvedStops()}),summary=el('div',null,{class:'np-summary'});summary.append(el('strong',t.name),el('span',`${t.length} days · ${model.stops.length} stops`));
- const tools=el('div',null,{class:'np-plan-tools'}),actions=el('div',null,{class:'np-actions'}),add=btn('+ Add stop',()=>{insert.hidden=!insert.hidden;if(!insert.hidden)position.focus();});add.classList.add('np-add-stop');const insert=el('div',null,{class:'np-add-control',hidden:''}),position=input('number',1,{min:1,max:model.stops.length+1,step:1,'aria-label':'New stop position'});insert.append(field('Position (1–'+(model.stops.length+1)+')',position),btn('Insert row',()=>run(async()=>{const n=Number(position.value);if(!Number.isInteger(n)||n<1||n>model.stops.length+1)throw Error('Enter a stop position from 1 to '+(model.stops.length+1)+'.');await addBlankStop(n-1);})),btn('Cancel',()=>{insert.hidden=true;position.value='1';add.focus();}));actions.append(add,insert,btn('Recalculate roads',()=>run(()=>route())),btn(editing?'Save changes':'Save private trip',()=>run(save),true));tools.append(actions);
+ const review=el('section',null,{class:'np-search',hidden:''});
+ const tools=el('div',null,{class:'np-plan-tools'}),actions=el('div',null,{class:'np-actions'}),add=btn('+ Add stop',()=>{insert.hidden=!insert.hidden;if(!insert.hidden)position.focus();});add.classList.add('np-add-stop');const insert=el('div',null,{class:'np-add-control',hidden:''}),position=input('number',1,{min:1,max:model.stops.length+1,step:1,'aria-label':'New stop position'});insert.append(field('Position (1–'+(model.stops.length+1)+')',position),btn('Insert row',()=>run(async()=>{const n=Number(position.value);if(!Number.isInteger(n)||n<1||n>model.stops.length+1)throw Error('Enter a stop position from 1 to '+(model.stops.length+1)+'.');await addBlankStop(n-1);})),btn('Cancel',()=>{insert.hidden=true;position.value='1';add.focus();}));actions.append(add,insert,btn('Recalculate trip',()=>run(()=>reviewTrip(review))),btn(editing?'Save changes':'Save private trip',()=>run(save),true));tools.append(actions);
  const routeIssues=(model.route?.legs||[]).map((leg,index)=>{const miles=leg.distance/1609.344,hours=leg.duration/3600,reasons=[];if(model.basics.distance&&miles>model.basics.distance)reasons.push('over '+model.basics.distance+' mi preferred');if(model.basics.hours&&hours>model.basics.hours)reasons.push('over '+model.basics.hours+' hr limit');if(!reasons.length)return null;const stops=resolvedStops(),from=index===0?model.basics.start.name:stopName(stops[index-1]),to=index>=stops.length?(C.miles(model.basics.start.point,model.basics.end.point)<.01?'return to start':model.basics.end.name):stopName(stops[index]);return {index,miles,hours,reasons,from,to};}).filter(Boolean);
  const alertBox=el('div',null,{class:'np-limit-alert',role:'alert','aria-live':'assertive'});if(routeIssues.length){const disclosure=el('details',null,{class:'np-limit-details'}),summary=el('summary','⚠ '+routeIssues.length+' driving legs are outside your limits · Expand to review'),list=el('div',null,{class:'np-limit-list'});for(const issue of routeIssues){const row=el('article',null,{class:'np-limit-item'}),why=el('p',issue.reasons.join(' · '));row.append(el('strong',(issue.index+1)+'. '+issue.from+' → '+issue.to),el('span',Math.round(issue.miles)+' mi · '+issue.hours.toFixed(1)+' hr'),why);const actions=el('div',null,{class:'np-limit-actions'});if(issue.index<resolvedStops().length){const target=resolvedStops()[issue.index],edit=btn('Edit stop #'+(issue.index+1),()=>{expandedStops.add(target);focusStop=target;render().then(()=>{const node=root?.querySelector('[data-focus-stop="true"]');node?.scrollIntoView({block:'center',behavior:'smooth'});});});actions.append(edit);}if(issue.index>0&&issue.index-1<resolvedStops().length){const target=resolvedStops()[issue.index-1],edit=btn('Edit stop #'+issue.index,()=>{expandedStops.add(target);focusStop=target;render().then(()=>{const node=root?.querySelector('[data-focus-stop="true"]');node?.scrollIntoView({block:'center',behavior:'smooth'});});});actions.append(edit);}actions.append(btn('Insert stop on this leg',()=>run(()=>addBlankStop(issue.index))));row.append(actions);list.append(row);}disclosure.append(summary,list);alertBox.append(disclosure);}else{alertBox.hidden=true;}
- const toolbar=el('div',null,{class:'np-editor-toolbar'});toolbar.append(summary,status,alertBox,tools);body.append(toolbar);say(routingError?'Road routing unavailable: '+routingError+' Distances are not shown until a route is found.':'Review and edit your stops, then save. Costs are your estimates, not booking quotes.');if(editing&&sharing){const privacy=el('details',null,{class:'np-privacy-details'});privacy.append(el('summary','Privacy & Sharing'));sharing.style.display='block';privacy.append(sharing);body.append(privacy);}
+ const toolbar=el('div',null,{class:'np-editor-toolbar'});toolbar.append(summary,status,alertBox,tools);body.append(toolbar,review);say(routingError?'Road routing unavailable: '+routingError+' Distances are not shown until a route is found.':'Review and edit your stops, then save. Costs are your estimates, not booking quotes.');if(editing&&sharing){const privacy=el('details',null,{class:'np-privacy-details'});privacy.append(el('summary','Privacy & Sharing'));sharing.style.display='block';privacy.append(sharing);body.append(privacy);}
  const params=el('details',null,{class:'np-trip-parameters'});params.open=parameterPanelOpen;params.addEventListener('toggle',()=>parameterPanelOpen=params.open);params.append(el('summary','Trip parameters'));params.append(el('p','Adjust the limits used to flag long driving legs. Changing these values updates the warnings without changing stop order.',{class:'np-muted'}));const parameterGrid=el('div',null,{class:'np-param-grid'}),distanceLimit=input('number',model.basics.distance,{min:25,max:600,step:1,'aria-label':'Preferred driving distance between stops in miles'}),hoursLimit=input('number',model.basics.hours??'',{min:1,max:14,step:.5,'aria-label':'Maximum driving hours per day'});parameterGrid.append(field('Preferred driving distance between stops (miles, optional if hours are set)',distanceLimit),field('Maximum driving hours per day (optional)',hoursLimit));params.append(parameterGrid);distanceLimit.onchange=()=>run(async()=>{const value=distanceLimit.value===''?null:Number(distanceLimit.value);if(value===null&&!model.basics.hours||value!==null&&(!Number.isInteger(value)||value<25||value>600)){distanceLimit.value=model.basics.distance??'';throw Error('Enter a preferred distance from 25–600 miles, or set driving hours before leaving this blank.');}parameterPanelOpen=true;model.basics.distance=value;dirty=true;await render();say('Preferred distance updated. Review the highlighted driving legs.');});hoursLimit.onchange=()=>run(async()=>{const value=hoursLimit.value===''?null:Number(hoursLimit.value);if(value!==null&&(!Number.isFinite(value)||value<1||value>14||value*2%1)||value===null&&model.basics.distance==null){hoursLimit.value=model.basics.hours??'';throw Error('Enter a maximum from 1 to 14 hours in half-hour steps, or keep a preferred distance limit.');}parameterPanelOpen=true;model.basics.hours=value;dirty=true;await render();say('Maximum driving hours updated. Review the highlighted driving legs.');});body.append(params);
  const layout=el('div',null,{class:'np-plan np-compact-plan'}),mapCol=el('div',null,{class:'np-map-column'}),mapBox=el('div',null,{class:'np-map','aria-label':'Proposed trip map'}),mapInfo=el('p','',{class:'np-muted'}),cards=el('div',null,{class:'np-stop-list'});mapCol.append(mapBox,mapInfo);layout.append(cards,mapCol);body.append(layout);
  const headers=el('div',null,{class:'np-list-grid np-list-heading'});['Stop name','Dates','Nights','Stay cost','Drive from previous','Order'].forEach(x=>headers.append(el('span',x)));cards.append(headers);
@@ -283,9 +413,9 @@ async function render(){
   const price=input('number',s.nightlyCost??'',{min:0,step:.01,'aria-label':'Estimated nightly cost at '+name}),currency=select([['USD','USD'],['CAD','CAD']],s.costCurrency||'USD');currency.setAttribute('aria-label','Cost currency at '+name);
   const updateCost=()=>{if(price.value!==''&&(!Number.isFinite(Number(price.value))||Number(price.value)<0)){say('Enter a nonnegative nightly cost.');return;}s.nightlyCost=price.value===''?null:Number(price.value);s.costCurrency=currency.value;dirty=true;cost.textContent=costLabel(s);};price.onchange=updateCost;currency.onchange=updateCost;
   const prices=el('div',null,{class:'np-inline'});prices.append(field('Estimated cost per night',price),field('Currency',currency));detail.append(prices);
-  const acts=el('div',null,{class:'np-attractions'});for(const a of s.activities){const item=el('div',null,{class:'np-attraction'});item.append(el('strong',a.name));if(a.official_url)item.append(link('Details',a.official_url));acts.append(item);}detail.append(el('h4','Planned attractions'),acts,btn('Choose attractions',()=>activityEditor(s,detail)));
+  const acts=el('div',null,{class:'np-attractions'});for(const a of s.activities){const item=el('div',null,{class:'np-attraction'});item.append(el('strong',a.name));if(a.official_url)item.append(link('Details',a.official_url));item.append(btn('Remove',()=>run(async()=>{dismissPlace(a.name);s.activities=s.activities.filter(x=>x!==a);dirty=true;focusStop=s;await render();})));acts.append(item);}detail.append(el('h4','Planned attractions'),acts,btn('Choose attractions',()=>activityEditor(s,detail)));
   const notes=el('textarea',null,{'aria-label':'Notes for '+name,placeholder:'Stop notes'});notes.value=s.notes||'';notes.oninput=()=>{s.notes=notes.value;dirty=true;};detail.append(notes);
-  if(model.stops.length>1)detail.append(btn('Remove stop',()=>run(async()=>{model.stops.splice(i,1);changed();await render();})));
+  detail.append(btn('Remove stop',()=>run(async()=>{dismissPlace(stopName(s));model.stops.splice(i,1);changed();await render();})));
  }
  endpoint(C.miles(model.basics.start.point,model.basics.end.point)<.01?'Return':'End',model.basics.end.name,tripDate(offset),model.route?.legs?.at(-1));
  try{const L=await leaflet();if(!mapBox.isConnected)return;map=L.map(mapBox,{scrollWheelZoom:false});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors',maxZoom:19}).addTo(map);layer=L.layerGroup().addTo(map);drawMap(mapInfo);}catch(e){mapBox.textContent=e.message;}
@@ -293,13 +423,27 @@ async function render(){
 }
 async function photo(id,host){if(!id||id.startsWith('saved-'))return;try{const rows=await query(db().from('npt_catalog_photos').select('url,alt_text,credit,source_url').eq('attraction_id',id).order('sort_order').limit(1));const p=rows[0];if(!p||!host.isConnected||!safeURL(p.url))return;const im=el('img',null,{src:p.url,alt:p.alt_text||'Attraction photo',class:'np-photo',loading:'lazy'});im.onerror=()=>im.remove();host.prepend(im);if(p.credit)host.append(el('small',p.credit,{class:'np-muted'}));}catch{}}
 function drawMap(info){if(!map)return;const L=window.L;layer.clearLayers();const points=[model.basics.start.point,...resolvedStops().map(stopPoint),model.basics.end.point];const line=geometry||model.route?.geometry;
- if(line)L.polyline(line,{color:'#315e42',weight:4}).addTo(layer);info.textContent=line?'Calculated roads · empty rows are not mapped until you choose a place. Verify RV clearances and seasonal access.':'Road route unavailable. Only stop markers are shown; retry Recalculate roads.';
+ if(line)L.polyline(line,{color:'#315e42',weight:4}).addTo(layer);info.textContent=line?'Calculated roads · empty rows are not mapped until you choose a place. Verify RV clearances and seasonal access.':'Road route unavailable. Only stop markers are shown; retry Recalculate trip.';
  const loop=C.miles(points[0],points.at(-1))<.01;
  points.forEach((p,i)=>{if(loop&&i===points.length-1)return;const endpoint=i===0||i===points.length-1,name=i===0?(loop?'Start / Return: ':'Start: ')+model.basics.start.name:i===points.length-1?'End: '+model.basics.end.name:'Stop '+(model.stops.indexOf(resolvedStops()[i-1])+1)+': '+stopName(resolvedStops()[i-1]);const badge=el('span',i===0?(loop?'S / R':'Start'):i===points.length-1?'End':String(model.stops.indexOf(resolvedStops()[i-1])+1),{class:'np-pin'+(endpoint?' np-endpoint-pin':'')});L.marker(p,{title:name,zIndexOffset:endpoint?500:0,icon:L.divIcon({html:badge,iconSize:endpoint?[60,29]:[29,29],iconAnchor:endpoint?[30,14]:[14,14]})}).addTo(layer).bindTooltip(name,{permanent:endpoint,direction:'top'}).bindPopup(el('strong',name));});
  for(const s of model.stops)for(const a of s.activities){if(a.latitude==null||a.longitude==null)continue;const content=el('div');content.append(el('strong',a.name),el('p',(a.description||'').slice(0,170)),link('Official details',a.official_url));const marker=L.marker(C.point(a),{icon:L.divIcon({html:el('span','◆',{class:'np-pin attraction'}),iconSize:[24,24]})}).addTo(layer).bindTooltip(a.name).bindPopup(content);marker.on('popupopen',()=>photo(a.id,content));}
  map.fitBounds(L.latLngBounds(line||points),{padding:[30,30],maxZoom:11});
 }
-async function route(redraw=true){const routeModel=model,routeOp=op;say('Calculating the driving route…');const pts=[model.basics.start.point,...resolvedStops().map(stopPoint),model.basics.end.point];const data=await json('https://routing.openstreetmap.de/routed-car/route/v1/driving/'+pts.map(p=>`${p[1]},${p[0]}`).join(';')+'?overview=simplified&geometries=geojson&steps=true');if(data.code!=='Ok'||!data.routes?.[0]||data.routes[0].legs.length!==pts.length-1)throw Error('No road route found. Try replacing a stop or campground.');if(!root||model!==routeModel||op!==routeOp)return;const r=data.routes[0];model.route={legGeometry:r.legs.map(l=>l.steps.flatMap(s=>s.geometry.coordinates.map(p=>[p[1],p[0]]))),legs:r.legs.map(l=>({distance:l.distance,duration:l.duration})),geometry:r.geometry.coordinates.map(p=>[p[1],p[0]]),calculatedAt:new Date().toISOString()};geometry=model.route.geometry;dirty=true;if(redraw){await render();say('Road route calculated. Highlighted legs exceed your driving preferences.');}}
+async function calculateRoute(basics,stops){
+ const pts=[basics.start.point,...stops.map(stopPoint),basics.end.point];
+ const data=await json('https://routing.openstreetmap.de/routed-car/route/v1/driving/'+pts.map(p=>`${p[1]},${p[0]}`).join(';')+'?overview=simplified&geometries=geojson&steps=true');if(data.code!=='Ok'||!data.routes?.[0]||data.routes[0].legs.length!==pts.length-1)throw Error('No road route found. Try replacing a stop or campground.');
+ const r=data.routes[0];
+ return {legGeometry:r.legs.map(l=>l.steps.flatMap(s=>s.geometry.coordinates.map(p=>[p[1],p[0]]))),legs:r.legs.map(l=>({distance:l.distance,duration:l.duration})),geometry:r.geometry.coordinates.map(p=>[p[1],p[0]]),calculatedAt:new Date().toISOString()};
+}
+async function route(redraw=true){
+ const routeModel=model,routeOp=op;
+ say('Calculating the driving route…');
+ const next=await calculateRoute(model.basics,resolvedStops());
+ if(!root||model!==routeModel||op!==routeOp)return;
+ model.route=next;geometry=next.geometry;dirty=true;
+ if(redraw){await render();say('Road route calculated. Highlighted legs exceed your driving preferences.');}
+}
+
 function activityEditor(s,card){card.querySelector('.np-activity-editor')?.remove();const box=el('div',null,{class:'np-search np-activity-editor'});box.append(el('h4','Attractions at this stop'));for(const a of s.options||[]){const check=input('checkbox');check.checked=s.activities.some(x=>x.id===a.id);const label=el('label',null,{class:'np-check'});label.append(check,' '+a.name);box.append(label);check.onchange=()=>{s.activities=check.checked?[...s.activities,a]:s.activities.filter(x=>x.id!==a.id);dirty=true;};}box.append(btn('Done',()=>run(render)));card.append(box);box.scrollIntoView({block:'nearest'});}
 async function campSearch(s,card){card.querySelector('.np-camp-search')?.remove();const box=el('div',null,{class:'np-search np-camp-search'}),q=input('search','',{placeholder:'Filter nearby results by name or brand','aria-label':'Campground name or brand'}),radius=select([['15','Within 15 miles'],['30','Within 30 miles'],['50','Within 50 miles'],['100','Within 100 miles']],'30'),full=input('checkbox'),unknown=input('checkbox');unknown.checked=true;radius.setAttribute('aria-label','Campground search distance');const results=el('div'),msg=el('p','Searching nearby…',{role:'status'});box.append(el('h4','Campgrounds near '+s.park.name),q,radius);for(const [x,label] of [[full,'Full hookups only'],[unknown,'Include sites with unconfirmed equipment fit']]){const l=el('label',null,{class:'np-check'});l.append(x,' '+label);box.append(l);}box.append(msg,results,link('Map data © OpenStreetMap contributors','https://www.openstreetmap.org/copyright'));card.append(box);let found=[],coverage='';
  function show(){results.replaceChildren();const filtered=found.filter(c=>{const fit=C.fit(c,model.basics.vehicle);return fit.ok&&(unknown.checked||!fit.unknown)&&(!full.checked||c.electric_hookups&&c.water_hookups&&c.sewer_hookups)&&[c.name,c.operator,c.metadata?.brand].join(' ').toLowerCase().includes(q.value.toLowerCase());});msg.textContent=(filtered.length?`${filtered.length} nearby options · ${found.length-filtered.length} hidden by filters. `:'No matches with these filters. ')+coverage+' Distances are by road when available; unknown distances are not confirmed within range. Map listings do not confirm RV fit or availability.';for(const c of filtered){const r=el('div',null,{class:'np-result'});r.append(el('h4',c.name),el('p',`${c.road_miles==null?'Road distance unavailable':c.road_miles.toFixed(1)+' road miles'} · ${C.hookups(c)}`),el('p',C.fit(c,model.basics.vehicle).label),link(c.official_url||c.reservation_url?'Official information':'Map listing',c.reservation_url||c.official_url||c.metadata?.source_url),btn('Use this campground',()=>run(async()=>{s.campground=c;changed();await render();say('Campground replaced. Driving distances updated where road routing is available.');})));if(c.metadata?.amenities?.length)r.append(el('p','Listed amenities: '+c.metadata.amenities.join(' · ')));if(c.metadata?.maxstay)r.append(el('p','Maximum stay listed: '+c.metadata.maxstay));if(c.metadata?.opening_hours)r.append(el('p','Hours: '+c.metadata.opening_hours));if(c.phone)r.append(el('p','Phone: '+c.phone));if(c.metadata?.stay_restrictions)r.append(el('p',c.metadata.stay_restrictions,{class:'np-warning'}));results.append(r);}}
