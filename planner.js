@@ -201,7 +201,20 @@ function showForm(){
  const selected=discovery.selected;for(const camp of selected.filter(x=>x.kind==='campground').map(x=>x.place)){const nearby=model.stops.map(s=>({s,d:C.miles(C.point(s.park),C.point(camp))})).filter(x=>!x.s.selectedCamp).sort((a,b)=>a.d-b.d);if(nearby[0]&&nearby[0].d<=100){nearby[0].s.campground=camp;nearby[0].s.selectedCamp=true;}else model.stops.push({park:{id:null,name:camp.name,region:camp.region,latitude:camp.latitude,longitude:camp.longitude},nights:1,campground:camp,activities:[],options:[],notes:'Selected before building the itinerary.'});}
  for(const address of selected.filter(x=>x.kind==='address').map(x=>x.place)){model.stops.push({park:{id:null,name:address.name,region:address.region,latitude:address.latitude,longitude:address.longitude},nights:1,kind:'address',addressOnly:true,campground:null,activities:[],options:[],notes:'Address stop selected before building the itinerary.'});}
  for(const attraction of selected.filter(x=>x.kind==='attraction').map(x=>x.place)){const exists=model.stops.some(s=>s.park?.name?.toLowerCase()===attraction.name.toLowerCase()||s.activities?.some(a=>a.name?.toLowerCase()===attraction.name.toLowerCase()));if(exists)continue;model.stops.push({park:{id:null,name:attraction.name,region:attraction.region,latitude:attraction.latitude,longitude:attraction.longitude,official_url:attraction.official_url},nights:0,campground:null,activities:[attraction],options:[attraction],attractionOnly:true,notes:'Must-stop attraction selected before building the itinerary.'});}
- const nightStops=model.stops.filter(s=>!s.attractionOnly),nights=basics.days-1;if(nightStops.length>nights)throw Error('There are more overnight stops than available nights. Increase the trip length or remove a selected campground.');nightStops.forEach((s,i)=>{s.nights=Math.floor(nights/nightStops.length)+(i<nights%nightStops.length?1:0);s.activities=s.options.slice(0,Math.min(5,s.nights));});model.stops=sequenceStops(model.stops,basics.start.point,basics.end.point);dirty=true;await render();});};
+ if(model.stops.filter(s=>!s.attractionOnly).length>basics.days-1)throw Error('There are more overnight stops than available nights. Increase the trip length or remove a selected campground.');
+ model.stops=sequenceStops(model.stops,basics.start.point,basics.end.point);
+ say('Finding overnight breaks and must-see stops along your route…');
+ let proposalNotice='';
+ try{await completeInitialProposal();}catch{proposalNotice='Some route suggestions could not be verified. Review highlighted driving legs or use Recalculate trip.';}
+ const nightStops=model.stops.filter(s=>!s.attractionOnly);
+ const destinations=nightStops.filter(s=>!s.transit);
+ const extra=basics.days-1-nightStops.length;
+ nightStops.forEach(s=>{s.nights=1;});
+ for(let i=0;i<extra&&destinations.length;i++)destinations[i%destinations.length].nights++;
+ destinations.forEach(s=>{s.activities=s.options.slice(0,Math.min(5,s.nights));});
+ dirty=true;await render();
+ if(proposalNotice)say(proposalNotice);
+ });};
 }
 function preTripSearch(start,destination,vehicle,length){
  const box=el('details',null,{class:'np-search np-pretrip-search'}),summary=el('summary','Find places before building the trip'),intro=el('p','Search for campsites or attractions, or enter a full street address to add a stop such as a friend’s home.',{class:'np-muted'}),kind=select([['campground','Campsites'],['attraction','Attractions'],['address','Direct address']],'campground'),term=input('search','',{placeholder:'Search by name','aria-label':'Search places by name'}),radius=select([['15','Within 15 miles'],['30','Within 30 miles'],['50','Within 50 miles'],['100','Within 100 miles'],['500','Whole state']],'30'),full=input('checkbox'),fit=input('checkbox'),results=el('div',null,{class:'np-discovery-results'}),selectedBox=el('div',null,{class:'np-selected-places'}),address=locationField('Full street address'),addressPanel=el('div',null,{class:'np-address-search',hidden:''}),selected=[],msg=el('p','Choose Campsites or Attractions, then type to see suggestions. Choose Direct address to add an address stop.',{role:'status'});
@@ -226,7 +239,7 @@ function preTripSearch(start,destination,vehicle,length){
 }
 async function campsNear(point,radius=30){const rows=await query(db().rpc('npt_nearby_campgrounds',{center_lat:point[0],center_lon:point[1],radius_miles:radius,required_rv_length_ft:null,require_full_hookups:false,include_unknown_fit:true,result_limit:100}).abortSignal(AbortSignal.timeout(15000)));if(!rows.length)return [];const details=await query(db().from('npt_campgrounds').select('*').in('id',rows.map(x=>x.id)).abortSignal(AbortSignal.timeout(15000)));const dist=new Map(rows.map(x=>[x.id,x.distance_miles]));return details.map(c=>({...c,distance_miles:dist.get(c.id)})).sort((a,b)=>a.distance_miles-b.distance_miles);}
 async function createStop(park){
- const camps=await campsNear(C.point(park),50),fits=camps.filter(c=>{const f=C.fit(c,model.basics.vehicle);return f.ok&&!f.unknown;});
+ const camps=await campsNear(C.point(park),50),fits=camps.filter(c=>{return C.fit(c,model.basics.vehicle).ok;});
  fits.sort((a,b)=>Number(C.fit(a,model.basics.vehicle).unknown)-Number(C.fit(b,model.basics.vehicle).unknown)||(a.park_id===park.id?-1:0)-(b.park_id===park.id?-1:0)||a.distance_miles-b.distance_miles);
  const activities=park.id?(await parkSights(park,C.point(park))).slice(0,10):[];
  return {park,nights:2,campground:fits[0]||null,activities:activities.slice(0,5),options:activities,notes:''};
@@ -369,7 +382,7 @@ async function reviewTrip(host){
       (exceedsDriveLimits(a,firstSeconds,basics)||exceedsDriveLimits(b,secondSeconds,basics)?' · Still exceeds a driving limit':'')));
     }else if(!choice.nearby)option.append(el('p','Road comparison unavailable.'));
     else option.append(el('p',Math.round(C.miles(stopPoint(stops[group.index]),C.point(c)))+' mi straight-line from the stop'));
-    if(['campground','stay'].includes(group.kind))option.append(el('p',[C.fit(c,basics.vehicle).label,C.hookups(c),c.metadata?.campground_price_summary||'Nightly price unconfirmed',group.kind==='campground'?'Adds one night':'Keeps the planned nights'].join(' · ')));
+    if(['campground','stay'].includes(group.kind))option.append(el('p',[campgroundFacts(c,basics.vehicle),group.kind==='campground'?'Adds one night':'Keeps the planned nights'].join(' · ')));
     else option.append(el('p',[c.npt_parks?.name,c.category,visitMinutes(c)!=null?visitMinutes(c)+' min estimated visit':'Visit duration unconfirmed',group.kind==='sightStop'?'No overnight stay':null].filter(Boolean).join(' · ')||'Visit duration unconfirmed'));
     option.append(link('Place details',c.reservation_url||c.official_url||c.metadata?.source_url));
     section.append(option);
@@ -414,6 +427,98 @@ async function reviewTrip(host){
  host.append(buttons);
 }
 
+async function completeInitialProposal(){
+ const {basics,stops}=model;
+ const excluded=new Set(stops.flatMap(s=>[stopName(s),...s.activities.map(a=>a.name)]).map(n=>n.toLowerCase()));
+ const overnightBudget=basics.days-1;
+ let route=await calculateRoute(basics,stops);
+ const magnitude=(meters,seconds)=>Math.max(
+  basics.distance?meters/1609.344/basics.distance:0,
+  basics.hours?seconds/3600/basics.hours:0);
+ const gapAt=index=>{
+  const waypoint=s=>({name:stopName(s),point:stopPoint(s)});
+  return {from:index?waypoint(stops[index-1]):basics.start,to:index<stops.length?waypoint(stops[index]):basics.end};
+ };
+ // Repeat after each batch so new legs are measured on the actual road route.
+ for(let pass=0;pass<3;pass++){
+  const room=Math.min(overnightBudget-stops.filter(s=>!s.attractionOnly).length,100-stops.length);
+  const longLegs=route.legs.map((l,index)=>({index,load:magnitude(l.distance,l.duration)}))
+   .filter(l=>l.load>1).sort((a,b)=>b.load-a.load).slice(0,Math.max(0,Math.min(room,6)));
+  if(room<=0||!longLegs.length)break;
+  const searches=await Promise.allSettled(longLegs.map(async leg=>({
+   ...leg,choices:(await gapOptions(gapAt(leg.index),'campground',excluded)).choices
+  })));
+  const additions=[];
+  for(const result of searches){
+   if(result.status!=='fulfilled')continue;
+   const {index,load,choices}=result.value;
+   const best=choices.filter(x=>[x.a,x.b,x.firstSeconds,x.secondSeconds].every(Number.isFinite)&&
+    !excluded.has(x.c.name.toLowerCase()))
+    .map(x=>({...x,load:Math.max(magnitude(x.a,x.firstSeconds),magnitude(x.b,x.secondSeconds))}))
+    .filter(x=>x.load<load-.05)
+    .sort((a,b)=>Number(a.load>1)-Number(b.load>1)||
+     Number(C.fit(a.c,basics.vehicle).unknown)-Number(C.fit(b.c,basics.vehicle).unknown)||
+     a.load-b.load||a.extra-b.extra)[0];
+   if(!best)continue;
+   excluded.add(best.c.name.toLowerCase());
+   const stop=reviewedStop(best.c,'campground');
+   stop.transit=true;stop.notes='Suggested overnight to break up a long drive.';
+   additions.push({index,stop});
+  }
+  if(!additions.length)break;
+  const proposed=[...stops];
+  for(const {index,stop} of additions.sort((a,b)=>b.index-a.index))proposed.splice(index,0,stop);
+  route=await calculateRoute(basics,proposed);
+  stops.splice(0,stops.length,...proposed);
+ }
+
+ const sightseeingLegs=route.legs.map((l,index)=>({l,index}))
+  .filter(({l,index})=>l.distance>=40*1609.344&&magnitude(l.distance,l.duration)<=1&&
+   (index===0||!stops[index-1].attractionOnly)&&(index===stops.length||!stops[index].attractionOnly))
+  .slice(0,Math.min(5,100-stops.length));
+ const sights=await Promise.allSettled(sightseeingLegs.map(async ({index})=>({
+  index,choices:(await gapOptions(gapAt(index),'attraction',excluded)).choices
+ })));
+ const proposed=[...stops], additions=[];
+ for(const result of sights){
+  if(result.status!=='fulfilled')continue;
+  const {index,choices}=result.value;
+  const best=choices.filter(x=>sightPriority(x.c)<=1&&x.extra!=null&&x.extra<=25*1609.344&&
+   [x.a,x.b,x.firstSeconds,x.secondSeconds].every(Number.isFinite)&&
+   magnitude(x.a+x.b,x.firstSeconds+x.secondSeconds)<=1&&!excluded.has(x.c.name.toLowerCase()))
+   .sort((a,b)=>sightPriority(a.c)-sightPriority(b.c)||a.extra-b.extra)[0];
+  if(!best)continue;
+  excluded.add(best.c.name.toLowerCase());
+  const stop=reviewedStop(best.c,'attraction');
+  stop.notes='Suggested must-see stop along the drive.';
+  additions.push({index,stop});
+ }
+ if(additions.length){
+  for(const {index,stop} of additions.sort((a,b)=>b.index-a.index))proposed.splice(index,0,stop);
+  route=await calculateRoute(basics,proposed);
+  stops.splice(0,stops.length,...proposed);
+ }
+ model.route=route;geometry=route.geometry;
+}
+function campgroundFacts(c,vehicle){
+ const m=c.metadata||{};
+ const amps=Array.isArray(m.electric_amps)?m.electric_amps.join('/'):m.electric_amps;
+ const rate=m.campground_price_summary||(
+  typeof m.campground_price_range==='string'?m.campground_price_range:null);
+ const hookup=(name,value)=>name+' '+(value===true?'yes':value===false?'no':'unknown');
+ const address=typeof m.address==='string'?m.address:null;
+ const inventory=m.source_published_site_inventory;
+ const sites=Number(inventory?.total)||null;
+ const length=Number(c.max_trailer_length_ft);
+ return [
+  C.fit(c,vehicle).label,
+  hookup('Electric',c.electric_hookups),hookup('Water',c.water_hookups),hookup('Sewer',c.sewer_hookups),
+  amps?amps+' amp':null,rate||'Nightly rate unconfirmed',
+  length>0?'Published trailer limit '+length+' ft':null,
+  sites?sites+' published sites':null,address,m.telephone||c.phone||null
+ ].filter(Boolean).join(' · ');
+}
+
 async function render(){
  const scroll=root?.scrollTop||0,renderOp=op,renderModel=model,sharing=document.querySelector('#ownerShare');
  if(!status.isConnected)body.append(status);
@@ -442,7 +547,15 @@ async function render(){
   const order=el('div',null,{class:'np-order'});
   for(const [delta,symbol,label] of [[-1,'↑','Move up'],[1,'↓','Move down']]){const arrow=btn(symbol,()=>run(async()=>{const j=i+delta;if(j<0||j>=model.stops.length)return;await moveStop(s,j);}));arrow.setAttribute('aria-label',label+' '+name);arrow.disabled=i+delta<0||i+delta>=model.stops.length;arrow.dataset.boundary=String(arrow.disabled);order.append(arrow);}
   dragStop(s,article,order);if(focusStop===s)article.dataset.focusStop='true';
-  row.append(toggle,dates,n,cost,drive,order);article.append(row,detail);cards.append(article);
+  row.append(toggle,dates,n,cost,drive,order);article.append(row);
+  if(c){
+   const facts=el('div',null,{class:'np-campground-summary'});
+   facts.append(el('span',campgroundFacts(c,model.basics.vehicle)));
+   const booking=link('Campground & booking',c.reservation_url||c.official_url);
+   if(booking)facts.append(booking);
+   article.append(facts);
+  }else if(s.nights>0&&!s.addressOnly)article.append(el('p','Campground needed · find nearby options',{class:'np-campground-summary'}));
+  article.append(detail);cards.append(article);
   detail.append(el('h4',s.park.name),btn('Show on map',()=>map?.flyTo(stopPoint(s),10,{duration:.5})),el('p',c?C.hookups(c)+' · '+C.fit(c,model.basics.vehicle).label:'No compatible campground selected.'),btn('Find nearby campgrounds',()=>run(()=>campSearch(s,detail))));
   if(leg)detail.append(el('p',Math.round(leg.distance/1609.344)+' road miles · '+(leg.duration/3600).toFixed(1)+' driving hours (without breaks)'));
   if(c){detail.append(link(c.operator&&/koa/i.test(c.operator)?'Official campground website · '+c.name:'Campground & booking information',c.reservation_url||c.official_url||c.metadata?.source_url));if(c.metadata?.amenities?.length)detail.append(el('p','Listed amenities: '+c.metadata.amenities.join(' · ')));if(c.metadata?.maxstay)detail.append(el('p','Maximum stay listed: '+c.metadata.maxstay));if(c.metadata?.opening_hours)detail.append(el('p','Hours: '+c.metadata.opening_hours));if(c.phone)detail.append(el('p','Phone: '+c.phone));if(c.reservation_notes)detail.append(el('p',c.reservation_notes));if(c.metadata?.stay_restrictions)detail.append(el('p',c.metadata.stay_restrictions,{class:'np-warning'}));}
@@ -482,7 +595,7 @@ async function route(redraw=true){
 
 function activityEditor(s,card){card.querySelector('.np-activity-editor')?.remove();const box=el('div',null,{class:'np-search np-activity-editor'});box.append(el('h4','Attractions at this stop'));for(const a of s.options||[]){const check=input('checkbox');check.checked=s.activities.some(x=>x.id===a.id);const label=el('label',null,{class:'np-check'});label.append(check,' '+a.name);box.append(label);check.onchange=()=>{s.activities=check.checked?[...s.activities,a]:s.activities.filter(x=>x.id!==a.id);dirty=true;};}box.append(btn('Done',()=>run(render)));card.append(box);box.scrollIntoView({block:'nearest'});}
 async function campSearch(s,card){card.querySelector('.np-camp-search')?.remove();const box=el('div',null,{class:'np-search np-camp-search'}),q=input('search','',{placeholder:'Filter nearby results by name or brand','aria-label':'Campground name or brand'}),radius=select([['15','Within 15 miles'],['30','Within 30 miles'],['50','Within 50 miles'],['100','Within 100 miles']],'30'),full=input('checkbox'),unknown=input('checkbox');unknown.checked=true;radius.setAttribute('aria-label','Campground search distance');const results=el('div'),msg=el('p','Searching nearby…',{role:'status'});box.append(el('h4','Campgrounds near '+s.park.name),q,radius);for(const [x,label] of [[full,'Full hookups only'],[unknown,'Include sites with unconfirmed equipment fit']]){const l=el('label',null,{class:'np-check'});l.append(x,' '+label);box.append(l);}box.append(msg,results,link('Map data © OpenStreetMap contributors','https://www.openstreetmap.org/copyright'));card.append(box);let found=[],coverage='';
- function show(){results.replaceChildren();const filtered=found.filter(c=>{const fit=C.fit(c,model.basics.vehicle);return fit.ok&&(unknown.checked||!fit.unknown)&&(!full.checked||c.electric_hookups&&c.water_hookups&&c.sewer_hookups)&&[c.name,c.operator,c.metadata?.brand].join(' ').toLowerCase().includes(q.value.toLowerCase());});msg.textContent=(filtered.length?`${filtered.length} nearby options · ${found.length-filtered.length} hidden by filters. `:'No matches with these filters. ')+coverage+' Distances are by road when available; unknown distances are not confirmed within range. Map listings do not confirm RV fit or availability.';for(const c of filtered){const r=el('div',null,{class:'np-result'});r.append(el('h4',c.name),el('p',`${c.road_miles==null?'Road distance unavailable':c.road_miles.toFixed(1)+' road miles'} · ${C.hookups(c)}`),el('p',C.fit(c,model.basics.vehicle).label),link(c.official_url||c.reservation_url?'Official information':'Map listing',c.reservation_url||c.official_url||c.metadata?.source_url),btn('Use this campground',()=>run(async()=>{s.campground=c;changed();await render();say('Campground replaced. Driving distances updated where road routing is available.');})));if(c.metadata?.amenities?.length)r.append(el('p','Listed amenities: '+c.metadata.amenities.join(' · ')));if(c.metadata?.maxstay)r.append(el('p','Maximum stay listed: '+c.metadata.maxstay));if(c.metadata?.opening_hours)r.append(el('p','Hours: '+c.metadata.opening_hours));if(c.phone)r.append(el('p','Phone: '+c.phone));if(c.metadata?.stay_restrictions)r.append(el('p',c.metadata.stay_restrictions,{class:'np-warning'}));results.append(r);}}
+ function show(){results.replaceChildren();const filtered=found.filter(c=>{const fit=C.fit(c,model.basics.vehicle);return fit.ok&&(unknown.checked||!fit.unknown)&&(!full.checked||c.electric_hookups&&c.water_hookups&&c.sewer_hookups)&&[c.name,c.operator,c.metadata?.brand].join(' ').toLowerCase().includes(q.value.toLowerCase());});msg.textContent=(filtered.length?`${filtered.length} nearby options · ${found.length-filtered.length} hidden by filters. `:'No matches with these filters. ')+coverage+' Distances are by road when available; unknown distances are not confirmed within range. Map listings do not confirm RV fit or availability.';for(const c of filtered){const r=el('div',null,{class:'np-result'});r.append(el('h4',c.name),el('p',`${c.road_miles==null?'Road distance unavailable':c.road_miles.toFixed(1)+' road miles'} · ${C.hookups(c)}`),el('p',campgroundFacts(c,model.basics.vehicle)),link(c.official_url||c.reservation_url?'Official information':'Map listing',c.reservation_url||c.official_url||c.metadata?.source_url),btn('Use this campground',()=>run(async()=>{s.campground=c;changed();await render();say('Campground replaced. Driving distances updated where road routing is available.');})));if(c.metadata?.amenities?.length)r.append(el('p','Listed amenities: '+c.metadata.amenities.join(' · ')));if(c.metadata?.maxstay)r.append(el('p','Maximum stay listed: '+c.metadata.maxstay));if(c.metadata?.opening_hours)r.append(el('p','Hours: '+c.metadata.opening_hours));if(c.phone)r.append(el('p','Phone: '+c.phone));if(c.metadata?.stay_restrictions)r.append(el('p',c.metadata.stay_restrictions,{class:'np-warning'}));results.append(r);}}
  async function search(){
  lock(true);msg.textContent='Searching catalog and mapped campgrounds…';results.replaceChildren();const point=stopPoint(s),range=Number(radius.value);
  const sources=await Promise.allSettled([campsNear(point,range),mappedCampgrounds(point,range)]);
