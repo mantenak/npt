@@ -6,6 +6,17 @@
   const db = window.supabase && window.supabase.createClient(URL, PUBLISHABLE);
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => [...document.querySelectorAll(s)];
+  function cityLabel(address) {
+    const parts=String(address||'').split(',').map(part=>part.trim()).filter(Boolean);
+    const region=/^(?:[A-Z]{2}|Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|District of Columbia|Alberta|British Columbia|Manitoba|New Brunswick|Newfoundland and Labrador|Nova Scotia|Ontario|Prince Edward Island|Quebec|Saskatchewan|Northwest Territories|Nunavut|Yukon)(?:\s+\d{5}(?:-\d{4})?|\s+[A-Z]\d[A-Z]\s?\d[A-Z]\d)?$/i;
+    const street=/^(?:\d|p\.?\s*o\.?\s+box\b)/i;
+    for(let i=parts.length-1;i>0;i--){
+      if(/^(?:US|USA|CA|Canada|United States(?: of America)?)$/i.test(parts[i])&&i===parts.length-1&&i>1&&region.test(parts[i-1]))continue;
+      if(!region.test(parts[i])||street.test(parts[i-1]))continue;
+      return parts[i-1]+', '+parts[i].replace(/\s+(?:\d{5}(?:-\d{4})?|[A-Z]\d[A-Z]\s?\d[A-Z]\d)$/i,'');
+    }
+    return parts.length===1&&!street.test(parts[0])?parts[0]:'Location unavailable';
+  }
   const clean = (v) => String(v == null ? "" : v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   let user = null, mine = [], publicTrips = [], loaded = false, lastViewed = null, catalogAdmin = false;
   const oldStartWizard = window.startWizard;
@@ -209,7 +220,7 @@
     if(!publicTrips.length){target.innerHTML='<div class="empty">No public trips yet. Published trips will appear here.</div>';return;}
     for(const t of publicTrips){
       const c=document.createElement("div");c.className="tripcard";
-      c.innerHTML='<h4>'+clean(t.name)+'</h4><p>'+clean(t.startLocation)+' → '+clean(t.endLocation)+'</p><p>'+t.length+' days · '+t.parks.length+' parks</p><div class="tripactions"><button class="btn" data-details>Details</button><button class="btn primary" data-walk>Preview Drive</button><button class="btn" data-copy>Copy Trip</button></div>';
+      c.innerHTML='<h4>'+clean(t.name)+'</h4><p>'+clean(cityLabel(t.startLocation))+' → '+clean(cityLabel(t.endLocation||t.startLocation))+'</p><p>'+t.length+' days · '+t.parks.length+' parks</p><div class="tripactions"><button class="btn" data-details>Details</button><button class="btn primary" data-walk>Preview Drive</button><button class="btn" data-copy>Copy Trip</button></div>';
       c.querySelector("[data-details]").onclick=()=>window.showTrip(t,false);
       const walk=c.querySelector("[data-walk]");
       walk.hidden=!t.days.length;
@@ -232,7 +243,7 @@
     const grid=document.createElement("div");grid.className="tripcards";
     for(const t of mine){
       const c=document.createElement("div");c.className="tripcard";
-      c.innerHTML='<h4>'+clean(t.name)+'</h4><p>'+clean(t.startLocation)+' · '+t.length+' days · '+t.parks.length+' parks</p><span class="badge '+(t.privacy==="public"?"link":"")+'">'+(t.privacy==="private"?"Private":t.privacy==="unlisted"?"Link sharing":"Public")+'</span><div class="tripactions"><button class="btn primary" data-open>'+(t.days.length?"Open plan":"Open trip")+'</button><button class="btn danger" data-delete>Delete</button></div>';
+      c.innerHTML='<h4>'+clean(t.name)+'</h4><p>'+clean(cityLabel(t.startLocation))+' → '+clean(cityLabel(t.endLocation||t.startLocation))+' · '+t.length+' days · '+t.parks.length+' parks</p><span class="badge '+(t.privacy==="public"?"link":"")+'">'+(t.privacy==="private"?"Private":t.privacy==="unlisted"?"Link sharing":"Public")+'</span><div class="tripactions"><button class="btn primary" data-open>'+(t.days.length?"Open plan":"Open trip")+'</button><button class="btn danger" data-delete>Delete</button></div>';
       c.querySelector("[data-open]").onclick=()=>{
         window.openTrip(t.id);
         const plan = $("#detailsSection");
